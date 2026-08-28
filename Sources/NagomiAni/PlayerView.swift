@@ -11,6 +11,10 @@ struct PlayerView: View {
                 emptyState
             } else {
                 VideoSurfaceRepresentable(view: model.engine.videoSurface ?? NSView())
+                VStack {
+                    topBar
+                    Spacer()
+                }
                 statusOverlay
                 controlsBar
                 hiddenSpaceShortcut
@@ -22,6 +26,9 @@ struct PlayerView: View {
         .onTapGesture { model.togglePlayPause() }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             handleDrop(providers)
+        }
+        .sheet(isPresented: $model.isBindSheetPresented) {
+            BindSubjectView(model: model)
         }
     }
 
@@ -42,6 +49,44 @@ struct PlayerView: View {
         }
     }
 
+    /// 顶部：文件名 + Bangumi 关联状态/按钮
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            Text(model.fileName ?? "")
+                .lineLimit(1)
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.75))
+                .truncationMode(.middle)
+
+            Spacer()
+
+            if let subject = model.boundSubject {
+                Label(subject.nameCN ?? subject.name ?? "已关联", systemImage: "checkmark.circle.fill")
+                    .font(.footnote)
+                Button("更换") {
+                    model.isBindSheetPresented = true
+                }
+                .controlSize(.small)
+                Button {
+                    model.unbind()
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.plain)
+                .help("解除关联")
+            } else {
+                Button("关联 Bangumi 条目") {
+                    model.isBindSheetPresented = true
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .padding(12)
+    }
+
     private var statusOverlay: some View {
         VStack {
             if model.isLoading {
@@ -55,9 +100,17 @@ struct PlayerView: View {
                     .padding(12)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
             }
+            if let message = model.syncMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.65), in: Capsule())
+            }
             Spacer()
         }
-        .padding(.top, 12)
+        .padding(.top, 56)
     }
 
     private var controlsBar: some View {

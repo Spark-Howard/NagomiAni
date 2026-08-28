@@ -11,8 +11,13 @@ final class AccountViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var clientID: String
     @Published var clientSecret: String
-    /// 正在标记"看过"的条目 ID
-    @Published var busySubjectID: Int?
+    /// 正在同步的条目 ID（预留）
+    @Published var collectionType: SubjectCollectionType = .doing {
+        didSet {
+            guard oldValue != collectionType, isLoggedIn else { return }
+            Task { await loadCollections() }
+        }
+    }
 
     private let defaults = UserDefaults.standard
     private let client = BangumiClient()
@@ -74,11 +79,8 @@ final class AccountViewModel: ObservableObject {
 
             let me = try await client.currentUser()
             user = me
-
-            // 拉取动画"在看"收藏
-            let page = try await client.collections(username: me.username, type: .doing, limit: 100)
-            collections = page.data
             isLoggedIn = true
+            await loadCollections()
         } catch {
             if case BangumiError.unauthorized = error {
                 auth?.logout()
@@ -91,33 +93,42 @@ final class AccountViewModel: ObservableObject {
         }
     }
 
-    /// 把某条目的"下一集"标记为看过（M2 手动同步演示）
-    func markNextWatched(_ collection: UserSubjectCollection) async {
-        let subjectID = collection.subjectID
-        busySubjectID = subjectID
-        defer { busySubjectID = nil }
+    /// 拉取当前收藏类型的列表
+    func loadCollections() async {
+        guard let user else { return }
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
 
         do {
-            let eps = try await client.episodes(subjectID: subjectID, type: 0, limit: 200)
-            let currentProgress = collection.epStatus ?? 0
-            let next = eps.data
-                .filter { ($0.sort ?? 0) > Double(currentProgress) }
-                .sorted { ($0.sort ?? 0) < ($1.sort ?? 0) }
-                .first
-
-            guard let target = next else {
-                errorMessage = "没有更多本篇可标记"
-                return
-            }
-
-            try await sync?.markWatched(subjectID: subjectID, episodeIDs: [target.id])
-            await refresh()
+            let page = try await client.collections(username: user.username, type: collectionType, limit: 100)
+            // 收藏列表接口不含条目详情，逐条补全（节流 + 最多 30 条）
+            collections = await fillMissingSubjects(page.data)
         } catch {
             errorMessage = Self.describe(error)
         }
     }
 
     // MARK: - 私有
+
+    /// 收藏列表接口不含 subject 详情，逐条补全名称/图片（最多 30 条，间隔 0.3s 节流）
+    private func fillMissingSubjects(_ collections: [UserSubjectCollection]) async -> [UserSubjectCollection] {
+        var result: [UserSubjectCollection] = []
+        for (index, collection) in collections.enumerated() {
+            if index >= 30 || collection.subject != nil {
+                result.append(collection)
+                continue
+            }
+            do {
+                let subject = try await client.subject(id: collection.subjectID)
+                result.append(UserSubjectCollection(collection: collection, subject: subject))
+            } catch {
+                result.append(collection)
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        return result
+    }
 
     private func setupAuth() {
         let config = BangumiAppConfig(clientID: clientID, clientSecret: clientSecret)

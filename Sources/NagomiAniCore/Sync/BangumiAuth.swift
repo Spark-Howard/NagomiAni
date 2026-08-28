@@ -1,7 +1,6 @@
 import AppKit
 import Foundation
 import Network
-import Security
 
 /// Bangumi 开发者应用配置（在 bgm.tv/dev/app 注册后获得）
 public struct BangumiAppConfig: Sendable {
@@ -17,7 +16,11 @@ public struct BangumiAppConfig: Sendable {
     }
 }
 
-/// Bangumi OAuth2 授权码流程 + 令牌管理（Keychain 存储）
+/// Bangumi OAuth2 授权码流程 + 令牌管理
+///
+/// 令牌存储说明：不使用 Keychain——`swift run` 启动的应用没有稳定代码签名，
+/// 钥匙串无法记住授权，会反复弹窗要求输入密码。改为存放到
+/// Application Support/NagomiAni/auth.json（0600 权限，仅当前用户可读写）。
 public final class BangumiAuth: @unchecked Sendable {
     public private(set) var accessToken: String?
     public private(set) var refreshToken: String?
@@ -27,11 +30,10 @@ public final class BangumiAuth: @unchecked Sendable {
     public var isLoggedIn: Bool { accessToken != nil }
 
     private let config: BangumiAppConfig
-    private let keychain = KeychainHelper(service: "com.nagomiani.player")
 
     public init(config: BangumiAppConfig) {
         self.config = config
-        loadFromKeychain()
+        loadTokens()
     }
 
     // MARK: - 登录
@@ -65,10 +67,7 @@ public final class BangumiAuth: @unchecked Sendable {
         refreshToken = nil
         userID = nil
         expiresAt = nil
-        keychain.delete("access_token")
-        keychain.delete("refresh_token")
-        keychain.delete("user_id")
-        keychain.delete("expires_at")
+        clearTokens()
     }
 
     /// token 过期前自动刷新
@@ -119,7 +118,7 @@ public final class BangumiAuth: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("nagomiani/0.1.0 (macOS) (https://github.com/nagomiani-macos)", forHTTPHeaderField: "User-Agent")
+        request.setValue("Spark-Howard/NagomiAni/0.1.0 (macOS) (https://github.com/Spark-Howard/NagomiAni)", forHTTPHeaderField: "User-Agent")
         request.httpBody = body.query?.data(using: .utf8)
 
         let (data, response): (Data, URLResponse)
@@ -129,25 +128,74 @@ public final class BangumiAuth: @unchecked Sendable {
             throw BangumiError.network
         }
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw BangumiError.httpStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let detail = String(data: data, encoding: .utf8).map { String($0.prefix(200)) } ?? ""
+            throw BangumiError.httpStatus(code, detail)
         }
 
         let token: TokenResponse
         do {
             token = try JSONDecoder().decode(TokenResponse.self, from: data)
         } catch {
-            throw BangumiError.decoding
+            throw BangumiError.decoding("")
         }
 
         accessToken = token.accessToken
         self.refreshToken = token.refreshToken
         userID = token.userID
         expiresAt = token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
+        saveTokens()
+    }
 
-        keychain.set(token.accessToken, forKey: "access_token")
-        if let refreshToken { keychain.set(refreshToken, forKey: "refresh_token") }
-        if let userID { keychain.set(String(userID), forKey: "user_id") }
-        if let expiresAt { keychain.set(String(expiresAt.timeIntervalSince1970), forKey: "expires_at") }
+    // MARK: - 令牌持久化（文件存储，避免 Keychain 弹窗）
+
+    private struct AuthTokenRecord: Codable {
+        var accessToken: String?
+        var refreshToken: String?
+        var userID: Int?
+        var expiresAt: Date?
+    }
+
+    private var tokenURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("NagomiAni", isDirectory: true)
+        return dir.appendingPathComponent("auth.json")
+    }
+
+    private func loadTokens() {
+        guard let data = try? Data(contentsOf: tokenURL),
+              let record = try? JSONDecoder().decode(AuthTokenRecord.self, from: data) else {
+            return
+        }
+        accessToken = record.accessToken
+        refreshToken = record.refreshToken
+        userID = record.userID
+        expiresAt = record.expiresAt
+    }
+
+    private func saveTokens() {
+        do {
+            let url = tokenURL
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let record = AuthTokenRecord(
+                accessToken: accessToken,
+                refreshToken: refreshToken,
+                userID: userID,
+                expiresAt: expiresAt
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .prettyPrinted
+            let data = try encoder.encode(record)
+            try data.write(to: url, options: .atomic)
+            // 仅当前用户可读写
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            print("[BangumiAuth] 令牌保存失败: \(error)")
+        }
+    }
+
+    private func clearTokens() {
+        try? FileManager.default.removeItem(at: tokenURL)
     }
 
     // MARK: - 本地回环回调服务器
@@ -195,7 +243,10 @@ public final class BangumiAuth: @unchecked Sendable {
                         return
                     }
 
-                    Self.sendResponse(connection, status: 200, body: "<h1>登录成功，可以关闭此页面</h1>")
+                    Self.sendResponse(connection, status: 200, body: """
+                    <h1>登录成功，可以关闭此页面</h1>
+                    <script>try { window.close(); } catch (e) {}</script>
+                    """)
                     listener.cancel()
                     if !resolved {
                         resolved = true
@@ -232,73 +283,5 @@ public final class BangumiAuth: @unchecked Sendable {
             return UInt16(port)
         }
         return 8123
-    }
-
-    // MARK: - Keychain
-
-    private func loadFromKeychain() {
-        if let token = keychain.get("access_token") {
-            accessToken = token
-        }
-        refreshToken = keychain.get("refresh_token")
-        if let id = keychain.get("user_id").flatMap(Int.init) {
-            userID = id
-        }
-        if let exp = keychain.get("expires_at").flatMap(Double.init) {
-            expiresAt = Date(timeIntervalSince1970: exp)
-        }
-    }
-}
-
-/// 轻量 Keychain 封装
-public final class KeychainHelper {
-    private let service: String
-
-    public init(service: String) {
-        self.service = service
-    }
-
-    @discardableResult
-    public func set(_ value: String, forKey key: String) -> Bool {
-        guard let data = value.data(using: .utf8) else { return false }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-        ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            var add = query
-            add[kSecValueData as String] = data
-            return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
-        }
-        return status == errSecSuccess
-    }
-
-    public func get(_ key: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else {
-            return nil
-        }
-        return String(data: data, encoding: .utf8)
-    }
-
-    @discardableResult
-    public func delete(_ key: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-        ]
-        return SecItemDelete(query as CFDictionary) == errSecSuccess
     }
 }

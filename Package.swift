@@ -38,5 +38,9 @@ let package = Package(
             name: "NagomiAniSmoke",
             dependencies: ["NagomiAniCore"]
         ),
+        .testTarget(
+            name: "NagomiAniCoreTests",
+            dependencies: ["NagomiAniCore"]
+        ),
     ]
 )

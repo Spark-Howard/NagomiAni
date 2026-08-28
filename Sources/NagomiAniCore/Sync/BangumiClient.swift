@@ -4,17 +4,21 @@ import Foundation
 public enum BangumiError: LocalizedError {
     case invalidURL
     case network
-    case decoding
+    case decoding(String)
     case unauthorized
-    case httpStatus(Int)
+    case httpStatus(Int, String?)
 
     public var errorDescription: String? {
         switch self {
         case .invalidURL: return "URL 无效"
         case .network: return "网络请求失败"
-        case .decoding: return "响应解析失败"
+        case .decoding(let detail): return detail.isEmpty ? "响应解析失败" : "响应解析失败：\(detail)"
         case .unauthorized: return "登录已失效，请重新登录"
-        case .httpStatus(let code): return "请求失败（HTTP \(code)）"
+        case .httpStatus(let code, let detail):
+            if let detail, !detail.isEmpty {
+                return "请求失败（HTTP \(code)）：\(detail)"
+            }
+            return "请求失败（HTTP \(code)）"
         }
     }
 }
@@ -23,8 +27,8 @@ public enum BangumiError: LocalizedError {
 public final class BangumiClient: @unchecked Sendable {
     /// 访问令牌（OAuth 登录后设置）
     public var accessToken: String?
-    /// User-Agent（官方要求带上应用名/版本/个人标识，否则默认 UA 可能被禁用）
-    public var userAgent: String = "nagomiani/0.1.0 (macOS) (https://github.com/nagomiani-macos)"
+    /// User-Agent（官方要求：开发者 ID + 应用名 + 版本 + 项目主页，否则默认 UA 可能被禁用）
+    public var userAgent: String = "Spark-Howard/NagomiAni/0.1.0 (macOS) (https://github.com/Spark-Howard/NagomiAni)"
 
     private let baseURL = URL(string: "https://api.bgm.tv")!
     private let session: URLSession
@@ -32,7 +36,9 @@ public final class BangumiClient: @unchecked Sendable {
     public init(accessToken: String? = nil) {
         self.accessToken = accessToken
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 20
+        // 搜索接口较重，超时放宽，避免慢查询被判为失败
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
         self.session = URLSession(configuration: config)
     }
 
@@ -41,6 +47,28 @@ public final class BangumiClient: @unchecked Sendable {
     /// 当前登录用户（GET /v0/me）
     public func currentUser() async throws -> BangumiUser {
         try await send(get("/v0/me"))
+    }
+
+    /// 获取条目详情（GET /v0/subjects/{id}，服务端缓存 300s）
+    public func subject(id: Int) async throws -> Subject {
+        try await send(get("/v0/subjects/\(id)"))
+    }
+
+    /// 搜索条目（POST /v0/search/subjects，实验性 API）
+    /// 只传 keyword + sort，不传 filter（实验性接口对 filter 兼容性不稳定）；
+    /// 动画类型过滤由调用方在客户端做。
+    public func searchSubjects(keyword: String, limit: Int = 20) async throws -> Paged<Subject> {
+        var request = try makeRequest("/v0/search/subjects", query: [
+            .init(name: "limit", value: String(limit))
+        ])
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "keyword": keyword,
+            "sort": "match",
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return try await send(request)
     }
 
     /// 获取用户收藏（GET /v0/users/{username}/collections）
@@ -121,36 +149,55 @@ public final class BangumiClient: @unchecked Sendable {
         return request
     }
 
-    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
+    /// 网络错误时自动重试（指数退避），应对实验性接口偶发断连
+    private static let maxRetries = 2
+
+    private func send<T: Decodable>(_ request: URLRequest, attempt: Int = 0) async throws -> T {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
         } catch {
+            if attempt < Self.maxRetries {
+                let delay = UInt64(1_000_000_000 * Double(attempt + 1))
+                try? await Task.sleep(nanoseconds: delay)
+                return try await send(request, attempt: attempt + 1)
+            }
             throw BangumiError.network
         }
         guard let http = response as? HTTPURLResponse else { throw BangumiError.network }
         guard (200...299).contains(http.statusCode) else {
             if http.statusCode == 401 { throw BangumiError.unauthorized }
-            throw BangumiError.httpStatus(http.statusCode)
+            throw BangumiError.httpStatus(http.statusCode, Self.bodySnippet(data))
         }
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
-            throw BangumiError.decoding
+            throw BangumiError.decoding(Self.bodySnippet(data))
         }
     }
 
-    private func sendNoContent(_ request: URLRequest) async throws {
-        let (_, response): (Data, URLResponse)
+    private func sendNoContent(_ request: URLRequest, attempt: Int = 0) async throws {
+        let (data, response): (Data, URLResponse)
         do {
-            (_, response) = try await session.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
+            if attempt < Self.maxRetries {
+                let delay = UInt64(1_000_000_000 * Double(attempt + 1))
+                try? await Task.sleep(nanoseconds: delay)
+                return try await sendNoContent(request, attempt: attempt + 1)
+            }
             throw BangumiError.network
         }
         guard let http = response as? HTTPURLResponse else { throw BangumiError.network }
         guard (200...299).contains(http.statusCode) else {
             if http.statusCode == 401 { throw BangumiError.unauthorized }
-            throw BangumiError.httpStatus(http.statusCode)
+            throw BangumiError.httpStatus(http.statusCode, Self.bodySnippet(data))
         }
+    }
+
+    /// 提取响应体前 200 字，便于排查错误原因
+    private static func bodySnippet(_ data: Data) -> String {
+        guard let text = String(data: data, encoding: .utf8) else { return "" }
+        return String(text.prefix(200))
     }
 }

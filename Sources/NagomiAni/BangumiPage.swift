@@ -1,27 +1,18 @@
 import SwiftUI
 import NagomiAniCore
 
-/// Bangumi 账号与收藏界面
-struct AccountView: View {
+/// Bangumi 收藏页（侧边栏第二页）
+struct BangumiPage: View {
     @ObservedObject var model: AccountViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Bangumi 同步")
-                    .font(.headline)
-                Spacer()
-                if model.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-
             if model.isLoggedIn {
-                userSection
-                collectionsSection
+                userHeader
+                typePicker
+                collectionsList
             } else {
-                loginSection
+                loginForm
             }
 
             if let message = model.errorMessage {
@@ -33,16 +24,18 @@ struct AccountView: View {
             Spacer()
         }
         .padding(20)
-        .frame(width: 520, height: 560)
+        .frame(minWidth: 520, minHeight: 480)
+        .navigationTitle("Bangumi")
     }
 
     // MARK: - 未登录
 
-    private var loginSection: some View {
+    private var loginForm: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("还没有 Bangumi 开发者应用？")
-                .font(.subheadline)
-            Text("1. 打开 bgm.tv/dev/app 注册应用\n2. 回调地址填写 http://127.0.0.1:8123/callback\n3. 把 App ID / App Secret 填到下面")
+            Text("登录 Bangumi 后即可同步收藏")
+                .font(.title3)
+
+            Text("还没有开发者应用？在 bgm.tv/dev/app 注册，回调地址填 http://127.0.0.1:8123/callback")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -64,11 +57,12 @@ struct AccountView: View {
             }
             .disabled(model.isLoading)
         }
+        .frame(maxWidth: 420, alignment: .leading)
     }
 
     // MARK: - 已登录
 
-    private var userSection: some View {
+    private var userHeader: some View {
         HStack(spacing: 12) {
             if let avatarURL = model.user?.avatar?.large,
                let url = URL(string: avatarURL) {
@@ -101,13 +95,31 @@ struct AccountView: View {
         }
     }
 
-    private var collectionsSection: some View {
+    private var typePicker: some View {
+        Picker("收藏类型", selection: $model.collectionType) {
+            ForEach(SubjectCollectionType.allCases.filter { $0 != .unknown }, id: \.self) { type in
+                Text(type.displayName)
+                    .tag(type)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    private var collectionsList: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("在看（动画）")
-                .font(.subheadline)
+            HStack {
+                Text(model.collectionType.displayName)
+                    .font(.subheadline)
+                Spacer()
+                if model.isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
 
             if model.collections.isEmpty {
-                Text("暂无在看条目")
+                Text("暂无收藏条目")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -151,18 +163,21 @@ struct AccountView: View {
             }
 
             Spacer()
-
-            if model.busySubjectID == collection.subjectID {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Button("标记下一集") {
-                    Task { await model.markNextWatched(collection) }
-                }
-                .controlSize(.small)
-            }
         }
         .padding(8)
         .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+extension SubjectCollectionType {
+    var displayName: String {
+        switch self {
+        case .wish: return "想看"
+        case .collected: return "看过"
+        case .doing: return "在看"
+        case .onHold: return "搁置"
+        case .dropped: return "抛弃"
+        case .unknown: return "其他"
+        }
     }
 }

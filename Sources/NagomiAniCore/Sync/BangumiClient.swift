@@ -1,0 +1,156 @@
+import Foundation
+
+/// Bangumi API 错误
+public enum BangumiError: LocalizedError {
+    case invalidURL
+    case network
+    case decoding
+    case unauthorized
+    case httpStatus(Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidURL: return "URL 无效"
+        case .network: return "网络请求失败"
+        case .decoding: return "响应解析失败"
+        case .unauthorized: return "登录已失效，请重新登录"
+        case .httpStatus(let code): return "请求失败（HTTP \(code)）"
+        }
+    }
+}
+
+/// Bangumi v0 API 客户端
+public final class BangumiClient: @unchecked Sendable {
+    /// 访问令牌（OAuth 登录后设置）
+    public var accessToken: String?
+    /// User-Agent（官方要求带上应用名/版本/个人标识，否则默认 UA 可能被禁用）
+    public var userAgent: String = "nagomiani/0.1.0 (macOS) (https://github.com/nagomiani-macos)"
+
+    private let baseURL = URL(string: "https://api.bgm.tv")!
+    private let session: URLSession
+
+    public init(accessToken: String? = nil) {
+        self.accessToken = accessToken
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 20
+        self.session = URLSession(configuration: config)
+    }
+
+    // MARK: - 公开方法
+
+    /// 当前登录用户（GET /v0/me）
+    public func currentUser() async throws -> BangumiUser {
+        try await send(get("/v0/me"))
+    }
+
+    /// 获取用户收藏（GET /v0/users/{username}/collections）
+    public func collections(
+        username: String,
+        subjectType: SubjectType? = .anime,
+        type: SubjectCollectionType? = nil,
+        limit: Int = 100,
+        offset: Int = 0
+    ) async throws -> Paged<UserSubjectCollection> {
+        var query: [URLQueryItem] = []
+        if let subjectType { query.append(.init(name: "subject_type", value: String(subjectType.rawValue))) }
+        if let type { query.append(.init(name: "type", value: String(type.rawValue))) }
+        query.append(.init(name: "limit", value: String(limit)))
+        query.append(.init(name: "offset", value: String(offset)))
+        return try await send(get("/v0/users/\(username)/collections", query: query))
+    }
+
+    /// 我的单个条目收藏（GET /v0/users/-/collections/{subject_id}）
+    public func myCollection(subjectID: Int) async throws -> UserSubjectCollection {
+        try await send(get("/v0/users/-/collections/\(subjectID)"))
+    }
+
+    /// 新增或修改条目收藏（POST /v0/users/-/collections/{subject_id}）
+    public func updateCollection(subjectID: Int, payload: CollectionModifyPayload) async throws {
+        var request = try makeRequest("/v0/users/-/collections/\(subjectID)")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(payload)
+        try await sendNoContent(request)
+    }
+
+    /// 获取条目的章节列表（GET /v0/episodes）
+    public func episodes(subjectID: Int, type: Int? = 0, limit: Int = 200, offset: Int = 0) async throws -> Paged<Episode> {
+        var query = [URLQueryItem(name: "subject_id", value: String(subjectID))]
+        if let type { query.append(.init(name: "type", value: String(type))) }
+        query.append(.init(name: "limit", value: String(limit)))
+        query.append(.init(name: "offset", value: String(offset)))
+        return try await send(get("/v0/episodes", query: query))
+    }
+
+    /// 批量标记单集收藏（PATCH /v0/users/-/collections/{subject_id}/episodes）
+    /// 官方会同时重算条目完成度，这是动画进度同步的正确姿势
+    public func markEpisodes(subjectID: Int, episodeIDs: [Int], type: EpisodeCollectionType) async throws {
+        var request = try makeRequest("/v0/users/-/collections/\(subjectID)/episodes")
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["episode_id": episodeIDs, "type": type.rawValue]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        try await sendNoContent(request)
+    }
+
+    /// 我的单集收藏（GET /v0/users/-/collections/{subject_id}/episodes）
+    public func myEpisodeCollections(subjectID: Int, limit: Int = 1000) async throws -> Paged<UserEpisodeCollection> {
+        try await send(get("/v0/users/-/collections/\(subjectID)/episodes", query: [
+            .init(name: "limit", value: String(limit))
+        ]))
+    }
+
+    // MARK: - 私有
+
+    private func get(_ path: String, query: [URLQueryItem] = []) throws -> URLRequest {
+        try makeRequest(path, query: query)
+    }
+
+    private func makeRequest(_ path: String, query: [URLQueryItem] = []) throws -> URLRequest {
+        var comps = URLComponents(string: baseURL.absoluteString + path)!
+        if !query.isEmpty { comps.queryItems = query }
+        guard let url = comps.url else { throw BangumiError.invalidURL }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let token = accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw BangumiError.network
+        }
+        guard let http = response as? HTTPURLResponse else { throw BangumiError.network }
+        guard (200...299).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw BangumiError.unauthorized }
+            throw BangumiError.httpStatus(http.statusCode)
+        }
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            throw BangumiError.decoding
+        }
+    }
+
+    private func sendNoContent(_ request: URLRequest) async throws {
+        let (_, response): (Data, URLResponse)
+        do {
+            (_, response) = try await session.data(for: request)
+        } catch {
+            throw BangumiError.network
+        }
+        guard let http = response as? HTTPURLResponse else { throw BangumiError.network }
+        guard (200...299).contains(http.statusCode) else {
+            if http.statusCode == 401 { throw BangumiError.unauthorized }
+            throw BangumiError.httpStatus(http.statusCode)
+        }
+    }
+}

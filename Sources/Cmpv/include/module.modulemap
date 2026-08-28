@@ -1,0 +1,7 @@
+module Cmpv {
+    header "mpv/client.h"
+    header "mpv/render.h"
+    header "mpv/render_gl.h"
+    header "nagomiru_shim.h"
+    export *
+}

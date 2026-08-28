@@ -1,0 +1,47 @@
+# ===== SwiftPM 构建产物 =====
+.build/
+.swiftpm/
+
+# ===== Xcode 用户数据 =====
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Xcode 自动生成（若不用 SwiftPM 管理 Xcode 工程时放开）
+# *.xcodeproj
+# *.xcworkspace
+
+# ===== macOS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 图标与资源残留
+Icon?
+._*
+
+# 临时文件
+*~
+*.swp
+*.tmp
+*.temp
+
+# ===== 编辑器/IDE =====
+.idea/
+.vscode/
+*.vscode
+
+# ===== 日志与测试产物 =====
+*.log
+xcresult/
+DerivedData/
+
+# ===== 用户配置（本地私密，不入库）=====
+# 若以后有本地私密配置可放这里，如：
+# config.local.plist

@@ -67,9 +67,16 @@ echo "▸ 3/5 签名（测试版 ad-hoc 签名）"
 codesign --force --deep --sign - \
     "$STAGE/${APP_NAME}.app"
 
-echo "▸ 4/5 制作 dmg"
+echo "▸ 4/5 制作 dmg（拖拽安装引导：App 图标 + 应用程序快捷方式）"
 mkdir -p "$DIST"
-hdiutil create -volname "${APP_NAME}" -srcfolder "$STAGE/${APP_NAME}.app" \
+rm -f "$DIST/$DMG_NAME"
+
+# 在 dmg 中放入 /Applications 符号链接作为拖拽安装目标
+# （hdiutil 会保留 symlink，Finder 中显示为可拖入的「应用程序」文件夹）
+ln -sf /Applications "$STAGE/Applications"
+
+# 源目录含 NagomiAni.app + Applications 链接，一起打包
+hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" \
     -ov -format UDZO "$DIST/$DMG_NAME"
 
 echo "▸ 5/5 完成"

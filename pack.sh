@@ -67,29 +67,35 @@ echo "▸ 3/5 签名（测试版 ad-hoc 签名）"
 codesign --force --deep --sign - \
     "$STAGE/${APP_NAME}.app"
 
-echo "▸ 4/5 制作 dmg（引导式安装界面）"
+echo "▸ 4/5 制作 dmg（引导式安装界面，手写 AppleScript 显式设置）"
 mkdir -p "$DIST"
 rm -f "$DIST/$DMG_NAME"
 
-# create-dmg：生成标准拖拽安装界面（背景图 + App 图标 + 箭头 + Applications 快捷方式）
-if command -v create-dmg >/dev/null 2>&1; then
-    create-dmg \
-        --volname "NagomiAni" \
-        --volicon "Assets/AppIcon.icns" \
-        --background "Assets/dmg_bg.png" \
-        --window-size 640 400 \
-        --icon "NagomiAni.app" 200 180 \
-        --app-drop-link 480 180 \
-        "$(pwd)/$DIST/$DMG_NAME" "$STAGE/" || {
-            echo "  ⚠ create-dmg 失败，回退到基础 dmg（含 Applications 快捷方式）"
-            ln -sf /Applications "$STAGE/Applications"
-            hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" -ov -format UDZO "$DIST/$DMG_NAME"
-        }
-else
-    echo "  ⚠ 未安装 create-dmg（brew install create-dmg），使用基础 dmg"
-    ln -sf /Applications "$STAGE/Applications"
-    hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" -ov -format UDZO "$DIST/$DMG_NAME"
+RW="$DIST/NagomiAni.rw.dmg"
+rm -f "$RW"
+
+# 1) 准备源目录：app + Applications 快捷方式 + 引导背景图（.background 隐藏目录）
+ln -sf /Applications "$STAGE/Applications"
+mkdir -p "$STAGE/.background"
+cp Assets/dmg_bg.png "$STAGE/.background/"
+cp Assets/AppIcon.icns "$STAGE/.VolumeIcon.icns"
+hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" \
+    -ov -format UDRW "$RW" >/dev/null 2>&1
+
+# 2) 挂载
+MOUNT=$(hdiutil attach "$RW" | grep "/Volumes/" | awk '{print $NF}' | head -1)
+if [ -z "$MOUNT" ]; then
+    echo "  ⚠ 挂载失败"
+    exit 1
 fi
+echo "  挂载于: $MOUNT"
+
+# 3) 用 Python 直接生成 .DS_Store（背景图 + 图标位置，不依赖 Finder/自动化）
+python3 make_dsstore.py "$MOUNT" || echo "  ⚠ .DS_Store 生成失败"
+
+hdiutil detach "$MOUNT" >/dev/null 2>&1
+hdiutil convert "$RW" -format UDZO -o "$DIST/$DMG_NAME" >/dev/null 2>&1
+rm -f "$RW"
 
 echo "▸ 5/5 完成"
 echo "──────────────────────────────────────"

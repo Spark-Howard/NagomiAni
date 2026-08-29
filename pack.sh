@@ -83,7 +83,7 @@ hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" \
     -ov -format UDRW "$RW" >/dev/null 2>&1
 
 # 2) 挂载
-MOUNT=$(hdiutil attach "$RW" | grep "/Volumes/" | awk '{print $NF}' | head -1)
+MOUNT=$(hdiutil attach -nobrowse "$RW" | grep "/Volumes/" | awk '{print $NF}' | head -1)
 if [ -z "$MOUNT" ]; then
     echo "  ⚠ 挂载失败"
     exit 1

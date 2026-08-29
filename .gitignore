@@ -49,3 +49,7 @@ DerivedData/
 # ===== 内部文档（个人开发笔记，不入库）=====
 CONVERSATION-ARCHIVE-*.md
 CONTEXT.md
+
+# ===== 打包产物（dmg 体积大，用 GitHub Release 分发，不入库）=====
+dist/
+*.dmg

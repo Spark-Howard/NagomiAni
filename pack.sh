@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 
 VERSION="${1:-0.1.0}"
 BUILD="${2:-1}"
-DMG_NAME="NagomiAni-${VERSION}-beta${BUILD}.dmg"
+DMG_NAME="NagomiAni-${VERSION}.dmg"
 
 APP_NAME="NagomiAni"
 BUNDLE_ID="com.nagomiani.player"
@@ -83,7 +83,9 @@ hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" \
     -ov -format UDRW "$RW" >/dev/null 2>&1
 
 # 2) 挂载
-MOUNT=$(hdiutil attach -nobrowse "$RW" | grep "/Volumes/" | awk '{print $NF}' | head -1)
+MOUNT="/Volumes/NagomiAni"
+hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+hdiutil attach "$RW" -nobrowse -mountpoint "$MOUNT" >/dev/null 2>&1
 if [ -z "$MOUNT" ]; then
     echo "  ⚠ 挂载失败"
     exit 1

@@ -54,19 +54,36 @@ public final class BangumiClient: @unchecked Sendable {
         try await send(get("/v0/subjects/\(id)"))
     }
 
+    /// 旧版大条目（GET /subject/{id}?responseGroup=large）
+    /// 一次返回集数列表 / 讨论版 / 评论日志 / 角色 / 制作人员（v0 API 不含这些）
+    public func legacySubjectLarge(id: Int) async throws -> LegacySubject {
+        try await send(get("/subject/\(id)", query: [
+            .init(name: "responseGroup", value: "large")
+        ]))
+    }
+
     /// 搜索条目（POST /v0/search/subjects，实验性 API）
-    /// 只传 keyword + sort，不传 filter（实验性接口对 filter 兼容性不稳定）；
-    /// 动画类型过滤由调用方在客户端做。
-    public func searchSubjects(keyword: String, limit: Int = 20) async throws -> Paged<Subject> {
+    /// 传 filter 可服务端按类型过滤（如 .anime → 只返回动画）；
+    /// 若 filter 不稳定（历史上 400 过），调用方应降级为客户端过滤。
+    public func searchSubjects(
+        keyword: String,
+        limit: Int = 20,
+        offset: Int = 0,
+        filterType: SubjectType? = nil
+    ) async throws -> Paged<Subject> {
         var request = try makeRequest("/v0/search/subjects", query: [
-            .init(name: "limit", value: String(limit))
+            .init(name: "limit", value: String(limit)),
+            .init(name: "offset", value: String(offset))
         ])
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "keyword": keyword,
             "sort": "match",
         ]
+        if let filterType {
+            body["filter"] = ["type": [filterType.rawValue]]
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return try await send(request)
     }
@@ -98,6 +115,15 @@ public final class BangumiClient: @unchecked Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(payload)
+        try await sendNoContent(request)
+    }
+
+    /// 移除条目收藏（POST 空 body 即取消收藏）
+    public func removeCollection(subjectID: Int) async throws {
+        var request = try makeRequest("/v0/users/-/collections/\(subjectID)")
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [String: Any]())
         try await sendNoContent(request)
     }
 

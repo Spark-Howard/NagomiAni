@@ -6,11 +6,11 @@ struct LibraryPage: View {
     @ObservedObject var model: LibraryViewModel
     /// 点击某一集时回调（由外层切换到播放器页并加载文件）
     var onPlay: (URL) -> Void
+    @State private var hoveredFilePath: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            foldersBar
             content
             if let message = model.statusMessage {
                 Text(message)
@@ -30,21 +30,21 @@ struct LibraryPage: View {
             LibraryBindSheet(model: model)
         }
         .alert(
-            "移除目录",
+            "移除番库条目",
             isPresented: Binding(
-                get: { model.folderToRemove != nil },
-                set: { if !$0 { model.cancelRemoveFolder() } }
+                get: { model.seriesToRemove != nil },
+                set: { if !$0 { model.cancelRemoveSeries() } }
             ),
-            presenting: model.folderToRemove
-        ) { folder in
+            presenting: model.seriesToRemove
+        ) { series in
             Button("移除", role: .destructive) {
-                model.confirmRemoveFolder()
+                model.confirmRemoveSeries()
             }
             Button("取消", role: .cancel) {
-                model.cancelRemoveFolder()
+                model.cancelRemoveSeries()
             }
-        } message: { folder in
-            Text("确定从番库移除目录「\((folder as NSString).lastPathComponent)」吗？其中的系列、关联与单集列表都会被删除。")
+        } message: { series in
+            Text("从番库移除「\((series.seriesKey as NSString).lastPathComponent)」吗？该目录下的文件索引会被删除（磁盘文件不受影响）。")
         }
     }
 
@@ -55,50 +55,16 @@ struct LibraryPage: View {
             Text("番库")
                 .font(.title2)
             Spacer()
-            if model.isScanning || model.isMatching {
+            if model.isScanning {
                 ProgressView()
                     .controlSize(.small)
             }
-            Button {
-                model.rescan()
-            } label: {
-                Label("重新扫描", systemImage: "arrow.clockwise")
-            }
-            .disabled(model.isScanning || model.isMatching)
             Button {
                 model.addFolders()
             } label: {
                 Label("添加目录", systemImage: "folder.badge.plus")
             }
             .controlSize(.large)
-        }
-    }
-
-    private var foldersBar: some View {
-        HStack(spacing: 8) {
-            ForEach(model.folders, id: \.self) { folder in
-                HStack(spacing: 4) {
-                    Text((folder as NSString).lastPathComponent)
-                        .font(.caption)
-                    Button {
-                        model.requestRemoveFolder(folder)
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-                    .help("移除目录：\(folder)")
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.gray.opacity(0.12), in: Capsule())
-            }
-            if model.folders.isEmpty {
-                Text("还没有目录，点「添加目录」导入你的动漫文件夹")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
         }
     }
 
@@ -138,26 +104,25 @@ struct LibraryPage: View {
         let title = subject?.nameCN ?? subject?.name ?? series.displayName
 
         return DisclosureGroup {
-            ForEach(series.sortedFiles) { file in
-                Button {
-                    onPlay(URL(fileURLWithPath: file.path))
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "play.circle")
-                            .foregroundStyle(.secondary)
-                        Text(file.fileName)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer()
-                        if let ep = file.episodeNumber {
-                            Text("第 \(ep) 集")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+            if let episodes = model.episodes(for: series), !episodes.isEmpty {
+                // 有 Bangumi 集数列表：按集数顺序排列，缺集显示"未找到"占位
+                ForEach(episodeRows(episodes, files: series.files)) { row in
+                    if row.files.isEmpty {
+                        missingRow(row.episode)
+                    } else {
+                        ForEach(row.files) { file in
+                            fileRow(file)
                         }
                     }
-                    .padding(.leading, 20)
                 }
-                .buttonStyle(.plain)
+                // 本地有、但 Bangumi 列表里没有对应集号的文件（如无集号文件）
+                ForEach(series.files.filter { $0.episodeNumber == nil }) { file in
+                    fileRow(file)
+                }
+            } else {
+                ForEach(series.sortedFiles) { file in
+                    fileRow(file)
+                }
             }
         } label: {
             HStack(spacing: 10) {
@@ -182,10 +147,153 @@ struct LibraryPage: View {
                 }
                 Spacer()
                 bindButton(for: series)
+                // 单番重扫：只关注该番所在目录的新增/删除
+                Button {
+                    model.rescanFolder(of: series)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .font(.system(size: 17))
+                .help("重新扫描该目录（检测新集 / 文件删除）")
+                .disabled(model.isScanning)
+                // 从番库移除该番
+                Button {
+                    model.requestRemoveSeries(series)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .font(.system(size: 17))
+                .help("从番库移除")
             }
         }
         .padding(10)
         .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        // 懒加载该番的 Bangumi 集数列表（已缓存则立即返回）
+        .onAppear {
+            Task { await model.ensureEpisodes(for: series) }
+        }
+    }
+
+    /// 一行展示数据：某个 Bangumi 集 + 匹配到的本地文件（可为空 = 缺失）
+    private struct EpisodeRow: Identifiable {
+        let id: Int
+        let episode: Episode
+        let files: [MediaFile]
+    }
+
+    /// 将 Bangumi 集数序列与本地文件按集号配对（按集号升序）
+    private func episodeRows(_ episodes: [Episode], files: [MediaFile]) -> [EpisodeRow] {
+        let byEp = Dictionary(grouping: files) { $0.episodeNumber }
+        return episodes
+            .sorted { ($0.sort ?? 0) < ($1.sort ?? 0) }
+            .map { ep in
+                let sort = Int((ep.sort ?? 0).rounded())
+                return EpisodeRow(id: ep.id, episode: ep, files: byEp[sort] ?? [])
+            }
+    }
+
+    /// 缺失集占位：虚线边框 + 问号图标 + "本地未找到"
+    private func missingRow(_ ep: Episode) -> some View {
+        let sort = Int((ep.sort ?? 0).rounded())
+        let title = ep.nameCN ?? ep.name
+        return HStack(spacing: 10) {
+            Image(systemName: "questionmark.circle.dashed")
+                .font(.system(size: 20))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text("第 \(sort) 集")
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                    if let title, !title.isEmpty {
+                        Text(title)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                HStack(spacing: 6) {
+                    if let airdate = ep.airdate, !airdate.isEmpty {
+                        Text(airdate)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Text("本地未找到")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.gray.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                .foregroundStyle(.secondary.opacity(0.35))
+        )
+        .opacity(0.85)
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
+    }
+
+    /// 单集条目：卡片式样式（播放图标 + 文件名 + 集数徽章/大小 + hover 高亮）
+    private func fileRow(_ file: MediaFile) -> some View {
+        Button {
+            onPlay(URL(fileURLWithPath: file.path))
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(file.fileName)
+                        .font(.body)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.primary)
+                    HStack(spacing: 6) {
+                        if let ep = file.episodeNumber {
+                            Text("第 \(ep) 集")
+                                .font(.caption2)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 1.5)
+                                .background(Color.accentColor.opacity(0.12), in: Capsule())
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        if let size = file.fileSize {
+                            Text(Self.formatFileSize(size))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .background(
+                hoveredFilePath == file.path ? Color.gray.opacity(0.16) : Color.gray.opacity(0.05),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering {
+                hoveredFilePath = file.path
+            } else if hoveredFilePath == file.path {
+                hoveredFilePath = nil
+            }
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
     }
 
     @ViewBuilder
@@ -243,7 +351,7 @@ struct LibraryPage: View {
                 Label("关联", systemImage: "link")
             }
         }
-        .controlSize(.small)
+        .controlSize(.regular)
         .help(series.matchState == .matched ? "重新关联到其它 Bangumi 条目" : "查看自动匹配结果并确认，或手动搜索")
     }
 }
@@ -380,5 +488,15 @@ struct LibraryBindSheet: View {
     private func search() {
         hasSearched = true
         Task { await model.searchForBinding(keyword: keyword) }
+    }
+}
+
+// MARK: - 工具
+
+private extension LibraryPage {
+    static func formatFileSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }

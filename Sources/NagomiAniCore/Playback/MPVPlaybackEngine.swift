@@ -23,9 +23,12 @@ public final class MPVPlaybackEngine: PlaybackEngine {
     private var cachedDuration: Double = 0
     private var cachedTime: Double = 0
     private var pendingAutoplay = true
+    private let loadLock = NSLock()
     private var loadContinuation: CheckedContinuation<Void, Error>?
     private var trackList: [MediaTrack] = []
     private var loadedURL: URL?
+    /// 最近选中的字幕轨道 id（关闭字幕后再开启时恢复）
+    private var lastSubtitleTrackID: Int64?
 
     // MARK: - 渲染视图
 
@@ -81,6 +84,9 @@ public final class MPVPlaybackEngine: PlaybackEngine {
 
     public func load(url: URL, options: PlaybackOptions) async throws {
         guard let handle = mpvHandle else { throw PlaybackError.unknown }
+        #if DEBUG
+        print("[mpv-engine] load begin: \(url.lastPathComponent)")
+        #endif
 
         loadedURL = url
         pendingAutoplay = options.autoplay
@@ -88,14 +94,30 @@ public final class MPVPlaybackEngine: PlaybackEngine {
         cachedDuration = 0
         eofFlag = false
         pausedFlag = false
+        trackList = []
+        lastSubtitleTrackID = nil
         setState(.loading)
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            loadLock.lock()
             loadContinuation = cont
-            let status = runCommand(["loadfile", url.path, "replace"])
-            if status < 0 {
-                loadContinuation = nil
-                cont.resume(throwing: PlaybackError.unknown)
+            loadLock.unlock()
+            // 超时兜底：FILE_LOADED 迟迟不来时不再无限转圈
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                #if DEBUG
+                print("[mpv-engine] load TIMEOUT waiting FILE_LOADED")
+                #endif
+                self?.resolveLoad(.failure(PlaybackError.unknown))
+            }
+            // loadfile 在后台线程执行：mpv_command 会阻塞到命令完成，
+            // 若在主线程调用，切页/加载大文件时 UI 会卡死（转圈定格）
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let status = self?.runCommand(["loadfile", url.path, "replace"]) ?? -1
+                if status < 0 {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.resolveLoad(.failure(PlaybackError.unknown))
+                    }
+                }
             }
         }
 
@@ -114,6 +136,11 @@ public final class MPVPlaybackEngine: PlaybackEngine {
             setState(.playing)
         }
         pausedFlag = false
+        if state == .ready {
+            // replace 切换后 pause 属性值未变（仍为 0），mpv 不会发属性变化事件，
+            // 这里主动补上 playing 状态
+            setState(.playing)
+        }
         var flag: Int32 = 0
         mpv_set_property(handle, "pause", MPV_FORMAT_FLAG, &flag)
     }
@@ -132,6 +159,8 @@ public final class MPVPlaybackEngine: PlaybackEngine {
         cachedTime = 0
         cachedDuration = 0
         loadedURL = nil
+        trackList = []
+        lastSubtitleTrackID = nil
         runCommand(["stop"])
         setState(.idle)
     }
@@ -159,6 +188,57 @@ public final class MPVPlaybackEngine: PlaybackEngine {
 
     public func selectSubtitleTrack(_ index: Int) {
         selectTrack(in: subtitleTracks, key: "sid", index: index)
+    }
+
+    // MARK: - 字幕（内置 + 外挂）
+
+    /// 挂载外部字幕文件（.srt/.ass/.vtt 等），成功返回 true
+    public func addExternalSubtitle(url: URL) -> Bool {
+        guard mpvHandle != nil, loadedURL != nil else { return false }
+        let title = url.lastPathComponent
+        let status = runCommand(["sub-add", url.path, "select", title])
+        refreshTrackList()
+        guard status >= 0 else { return false }
+        // mpv_command 不返回 sub-add 的轨道 id，用轨道列表确认挂载成功
+        if let track = subtitleTracks.first(where: {
+            $0.externalFilename == url.path || $0.name == title
+        }) {
+            lastSubtitleTrackID = Int64(track.id)
+            return true
+        }
+        return false
+    }
+
+    /// 开关字幕显示（false = 关闭，true = 恢复上次选择或自动选择）
+    public func setSubtitleEnabled(_ enabled: Bool) {
+        guard mpvHandle != nil else { return }
+        if enabled {
+            if let last = lastSubtitleTrackID, last > 0 {
+                var id = last
+                mpv_set_property(mpvHandle, "sid", MPV_FORMAT_INT64, &id)
+            } else {
+                mpv_set_property_string(mpvHandle, "sid", "auto")
+            }
+        } else {
+            selectTrack(in: subtitleTracks, key: "sid", index: -1)
+            return
+        }
+        refreshTrackList()
+    }
+
+    /// 字幕显示延迟（秒，正数延后）
+    public var subtitleDelay: Double {
+        get {
+            guard let handle = mpvHandle else { return 0 }
+            var value = 0.0
+            mpv_get_property(handle, "sub-delay", MPV_FORMAT_DOUBLE, &value)
+            return value.isFinite ? value : 0
+        }
+        set {
+            guard let handle = mpvHandle else { return }
+            var value = newValue
+            mpv_set_property(handle, "sub-delay", MPV_FORMAT_DOUBLE, &value)
+        }
     }
 
     // MARK: - 配置
@@ -221,9 +301,15 @@ public final class MPVPlaybackEngine: PlaybackEngine {
     private func handleEvent(_ event: UnsafeMutablePointer<mpv_event>) {
         switch event.pointee.event_id {
         case MPV_EVENT_START_FILE:
+            #if DEBUG
+            print("[mpv-engine] START_FILE")
+            #endif
             setState(.loading)
 
         case MPV_EVENT_FILE_LOADED:
+            #if DEBUG
+            print("[mpv-engine] FILE_LOADED")
+            #endif
             resolveLoad(.success(()))
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -234,6 +320,9 @@ public final class MPVPlaybackEngine: PlaybackEngine {
         case MPV_EVENT_END_FILE:
             if let data = event.pointee.data {
                 let endFile = data.assumingMemoryBound(to: mpv_event_end_file.self).pointee
+                #if DEBUG
+                print("[mpv-engine] END_FILE reason=\(endFile.reason)")
+                #endif
                 if endFile.reason == MPV_END_FILE_REASON_EOF {
                     resolveLoad(.success(()))
                     eofFlag = true
@@ -245,8 +334,9 @@ public final class MPVPlaybackEngine: PlaybackEngine {
                 } else if endFile.reason == MPV_END_FILE_REASON_ERROR {
                     resolveLoad(.failure(PlaybackError.unknown))
                     setState(.failed("播放出错"))
-                } else if state == .loading {
-                    // stop / redirect 等异常中断
+                } else if state == .loading, endFile.reason != MPV_END_FILE_REASON_STOP {
+                    // stop 是 loadfile replace 切换时旧文件被替换的正常中断，
+                    // 此时新文件正在加载，不能误判为失败
                     resolveLoad(.failure(PlaybackError.unknown))
                     setState(.failed("播放失败"))
                 }
@@ -300,6 +390,7 @@ public final class MPVPlaybackEngine: PlaybackEngine {
         case "track-list":
             let node = valueData.assumingMemoryBound(to: mpv_node.self).pointee
             trackList = parseTrackList(node)
+            notifyTracksChanged()
 
         default:
             break
@@ -335,9 +426,11 @@ public final class MPVPlaybackEngine: PlaybackEngine {
     }
 
     private func resolveLoad(_ result: Result<Void, Error>) {
-        guard let cont = loadContinuation else { return }
+        loadLock.lock()
+        let cont = loadContinuation
         loadContinuation = nil
-        cont.resume(with: result)
+        loadLock.unlock()
+        cont?.resume(with: result)
     }
 
     // MARK: - 轨道
@@ -345,11 +438,16 @@ public final class MPVPlaybackEngine: PlaybackEngine {
     private func selectTrack(in tracks: [MediaTrack], key: String, index: Int) {
         guard let handle = mpvHandle else { return }
         if index == -1 {
+            if key == "sid", let current = subtitleTracks.first(where: { $0.isSelected }) {
+                lastSubtitleTrackID = Int64(current.id)
+            }
             mpv_set_property_string(handle, key, "no")
         } else if tracks.indices.contains(index) {
             var id = Int64(tracks[index].id)
             mpv_set_property(handle, key, MPV_FORMAT_INT64, &id)
+            if key == "sid" { lastSubtitleTrackID = id }
         }
+        refreshTrackList()
     }
 
     private func parseTrackList(_ node: mpv_node) -> [MediaTrack] {
@@ -367,6 +465,8 @@ public final class MPVPlaybackEngine: PlaybackEngine {
             var title: String?
             var lang: String?
             var selected = false
+            var external = false
+            var externalFilename: String?
 
             for j in 0..<Int(map.num) {
                 let key = map.keys![j].map { String(cString: $0) } ?? ""
@@ -382,6 +482,10 @@ public final class MPVPlaybackEngine: PlaybackEngine {
                     lang = stringValue(value)
                 case "selected":
                     selected = value.u.flag != 0
+                case "external":
+                    external = value.u.flag != 0
+                case "external-filename":
+                    externalFilename = stringValue(value)
                 default:
                     break
                 }
@@ -394,12 +498,24 @@ public final class MPVPlaybackEngine: PlaybackEngine {
             default: continue // video 等暂不展示
             }
 
+            // 外挂字幕没有 title 时，用文件名作为显示名
+            let displayName: String?
+            if let title, !title.isEmpty {
+                displayName = title
+            } else if let externalFilename {
+                displayName = URL(fileURLWithPath: externalFilename).lastPathComponent
+            } else {
+                displayName = lang
+            }
+
             result.append(MediaTrack(
                 id: id,
                 kind: kind,
-                name: title ?? lang,
+                name: displayName,
                 language: lang,
-                isSelected: selected
+                isSelected: selected,
+                isExternal: external,
+                externalFilename: externalFilename
             ))
         }
         return result
@@ -413,6 +529,26 @@ public final class MPVPlaybackEngine: PlaybackEngine {
     private func intValue(_ node: mpv_node) -> Int? {
         guard node.format == MPV_FORMAT_INT64 else { return nil }
         return Int(node.u.int64)
+    }
+
+    // MARK: - 轨道刷新
+
+    /// 立即读取 track-list 属性并广播（用于 sub-add / 选择变更后强制同步）
+    private func refreshTrackList() {
+        guard let handle = mpvHandle else { return }
+        var node = mpv_node()
+        let status = mpv_get_property(handle, "track-list", MPV_FORMAT_NODE, &node)
+        guard status >= 0 else { return }
+        trackList = parseTrackList(node)
+        mpv_free_node_contents(&node)
+        notifyTracksChanged()
+    }
+
+    private func notifyTracksChanged() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.playbackEngineDidUpdateTracks(self)
+        }
     }
 
     // MARK: - 工具

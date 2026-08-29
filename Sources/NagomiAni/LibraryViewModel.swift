@@ -12,6 +12,8 @@ final class LibraryViewModel: ObservableObject {
     @Published var statusMessage: String?
     /// subjectID → Subject（用于显示封面与 Bangumi 名称）
     @Published var subjects: [Int: Subject] = [:]
+    /// subjectID → 集数列表（番库展开时按 Bangumi 集数序列展示，缺集标记"未找到"）
+    @Published var episodesBySubject: [Int: [Episode]] = [:]
     /// 手动绑定的搜索
     @Published var searchResults: [Subject] = []
     @Published var isSearching = false
@@ -27,8 +29,8 @@ final class LibraryViewModel: ObservableObject {
             Task { await loadBindCandidates(for: key) }
         }
     }
-    /// 等待确认移除的目录
-    @Published var folderToRemove: String?
+    /// 等待确认移除的番（非 nil 时弹出确认）
+    @Published var seriesToRemove: Series?
 
     private let library: MediaLibrary
 
@@ -39,6 +41,7 @@ final class LibraryViewModel: ObservableObject {
         library = MediaLibrary(storeURL: storeURL)
         reload()
         Task { await ensureSubjects() }
+        Task { await ensureEpisodes() }
         Task { await runAutoMatch() }
     }
 
@@ -63,22 +66,40 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func requestRemoveFolder(_ path: String) {
-        folderToRemove = path
+    func requestRemoveSeries(_ series: Series) {
+        seriesToRemove = series
     }
 
-    func cancelRemoveFolder() {
-        folderToRemove = nil
+    func cancelRemoveSeries() {
+        seriesToRemove = nil
     }
 
-    func confirmRemoveFolder() {
-        guard let folder = folderToRemove else { return }
+    /// 从番库移除某部番（删除它所属的目录索引，磁盘文件不受影响）
+    func confirmRemoveSeries() {
+        guard let series = seriesToRemove else { return }
+        let folder = library.owningFolder(of: series.seriesKey) ?? series.seriesKey
         library.removeFolder(folder)
-        folderToRemove = nil
         subjects = subjects.filter { key, _ in
             library.series.contains { $0.subjectID == key }
         }
+        seriesToRemove = nil
         reload()
+    }
+
+    /// 只重扫某部番所在目录（检测新集补齐 / 文件删除）
+    func rescanFolder(of series: Series) {
+        guard !isScanning else { return }
+        isScanning = true
+        statusMessage = nil
+        let folder = series.seriesKey
+        let library = self.library
+        Task.detached(priority: .userInitiated) {
+            library.rescanFolder(folder)
+            await MainActor.run {
+                self.isScanning = false
+                self.reload()
+            }
+        }
     }
 
     // MARK: - 扫描与自动匹配
@@ -193,6 +214,15 @@ final class LibraryViewModel: ObservableObject {
     func bind(subject: Subject, to seriesKey: String) {
         library.setBinding(seriesKey: seriesKey, subjectID: subject.id)
         subjects[subject.id] = subject
+        // 拉取该条目的集数列表（番库展开按集数显示）
+        if episodesBySubject[subject.id] == nil {
+            Task { [weak self] in
+                guard let self,
+                      let client = await BangumiSession.makeClient(),
+                      let page = try? await client.episodes(subjectID: subject.id, type: 0, limit: 200) else { return }
+                self.episodesBySubject[subject.id] = page.data
+            }
+        }
         // 清除候选缓存：已关联不再显示"建议 N"，且之后点"更换"会重新匹配
         candidates[seriesKey] = nil
         bindTarget = nil
@@ -217,6 +247,36 @@ final class LibraryViewModel: ObservableObject {
             }
             try? await Task.sleep(nanoseconds: 200_000_000)
         }
+    }
+
+    // MARK: - 集数列表（按 Bangumi 集数序列展示）
+
+    /// 启动时预拉取所有已关联条目的集数列表（节流）
+    func ensureEpisodes() async {
+        guard let client = await BangumiSession.makeClient() else { return }
+        let matched = library.series.filter { $0.matchState == .matched && $0.subjectID != nil }
+        for series in matched {
+            guard let id = series.subjectID, episodesBySubject[id] == nil else { continue }
+            if let page = try? await client.episodes(subjectID: id, type: 0, limit: 200) {
+                episodesBySubject[id] = page.data
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+    }
+
+    /// 懒加载某部番的集数列表（缓存为空时才请求；未登录/失败静默）
+    func ensureEpisodes(for series: Series) async {
+        guard let id = series.subjectID, episodesBySubject[id] == nil else { return }
+        guard let client = await BangumiSession.makeClient() else { return }
+        if let page = try? await client.episodes(subjectID: id, type: 0, limit: 200) {
+            episodesBySubject[id] = page.data
+        }
+    }
+
+    /// 某部番的 Bangumi 集数列表（未关联/未拉取到则为 nil）
+    func episodes(for series: Series) -> [Episode]? {
+        guard let id = series.subjectID else { return nil }
+        return episodesBySubject[id]
     }
 
     // MARK: - 私有

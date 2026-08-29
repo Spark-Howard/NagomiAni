@@ -179,12 +179,14 @@ public final class AVPlaybackEngine: NSObject, PlaybackEngine {
         } else if index < group.options.count {
             item.select(group.options[index], in: group)
         }
+        delegate?.playbackEngineDidUpdateTracks(self)
     }
 
     private func refreshMediaSelectionGroups() async {
         guard let item else { return }
         audibleGroup = try? await item.asset.loadMediaSelectionGroup(for: .audible)
         legibleGroup = try? await item.asset.loadMediaSelectionGroup(for: .legible)
+        delegate?.playbackEngineDidUpdateTracks(self)
     }
 
     private func installItemObservers() {

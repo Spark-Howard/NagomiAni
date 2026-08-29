@@ -34,13 +34,27 @@ public struct MediaTrack: Identifiable, Equatable, Sendable {
     public let name: String?
     public let language: String?
     public let isSelected: Bool
+    /// 是否为外挂轨道（mpv 中 external=yes，如外挂字幕文件）
+    public let isExternal: Bool
+    /// 外挂文件的路径（存在时可用于显示文件名）
+    public let externalFilename: String?
 
-    public init(id: Int, kind: MediaKind, name: String?, language: String?, isSelected: Bool) {
+    public init(
+        id: Int,
+        kind: MediaKind,
+        name: String?,
+        language: String?,
+        isSelected: Bool,
+        isExternal: Bool = false,
+        externalFilename: String? = nil
+    ) {
         self.id = id
         self.kind = kind
         self.name = name
         self.language = language
         self.isSelected = isSelected
+        self.isExternal = isExternal
+        self.externalFilename = externalFilename
     }
 }
 
@@ -75,6 +89,12 @@ public protocol PlaybackEngineDelegate: AnyObject {
     func playbackEngine(_ engine: PlaybackEngine, didChangeState state: PlaybackState)
     func playbackEngineDidFinish(_ engine: PlaybackEngine)
     func playbackEngine(_ engine: PlaybackEngine, didFailWith error: Error)
+    /// 轨道列表变化（内置轨道就绪、外挂字幕加载、轨道选择变更等）
+    func playbackEngineDidUpdateTracks(_ engine: PlaybackEngine)
+}
+
+public extension PlaybackEngineDelegate {
+    func playbackEngineDidUpdateTracks(_ engine: PlaybackEngine) {}
 }
 
 /// 播放内核抽象：UI 与业务逻辑只依赖此协议，不关心底层实现
@@ -101,8 +121,20 @@ public protocol PlaybackEngine: AnyObject {
     func selectAudioTrack(_ index: Int)
     func selectSubtitleTrack(_ index: Int)
 
+    /// 挂载外部字幕文件（.srt/.ass/.vtt 等），成功返回 true
+    func addExternalSubtitle(url: URL) -> Bool
+    /// 开关字幕显示（false = 关闭）
+    func setSubtitleEnabled(_ enabled: Bool)
+
     /// 引擎提供的视频渲染视图（UI 层直接嵌入）
     var videoSurface: NSView? { get }
 
     static var capabilities: PlaybackCapabilities { get }
+}
+
+public extension PlaybackEngine {
+    /// 默认实现：不支持外挂字幕的内核直接返回 false
+    func addExternalSubtitle(url: URL) -> Bool { false }
+    /// 默认实现：无操作
+    func setSubtitleEnabled(_ enabled: Bool) {}
 }

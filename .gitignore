@@ -45,3 +45,7 @@ DerivedData/
 # ===== 用户配置（本地私密，不入库）=====
 # 若以后有本地私密配置可放这里，如：
 # config.local.plist
+
+# ===== 内部文档（个人开发笔记，不入库）=====
+CONVERSATION-ARCHIVE-*.md
+CONTEXT.md

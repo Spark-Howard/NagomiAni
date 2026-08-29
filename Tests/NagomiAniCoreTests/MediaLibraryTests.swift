@@ -128,4 +128,79 @@ final class MediaLibraryTests: XCTestCase {
         XCTAssertEqual(seriesA.files.count, 2)
         XCTAssertEqual(seriesA.sortedFiles.first?.episodeNumber, 1)
     }
+
+    // MARK: - 单目录重扫（番级"重新扫描"）
+
+    func testRescanFolderOnlyAffectsThatFolder() throws {
+        let dirA = tempDir.appendingPathComponent("番A")
+        try FileManager.default.createDirectory(at: dirA, withIntermediateDirectories: true)
+        try makeFile("番A EP01.mkv", in: dirA)
+
+        let dirB = tempDir.appendingPathComponent("番B")
+        try FileManager.default.createDirectory(at: dirB, withIntermediateDirectories: true)
+        try makeFile("番B EP01.mkv", in: dirB)
+
+        let library = MediaLibrary(storeURL: tempDir.appendingPathComponent("lib.json"))
+        library.addFolder(dirA.path)
+        library.addFolder(dirB.path)
+        library.rescan()
+        XCTAssertEqual(library.series.count, 2)
+
+        // 只重扫 A：新增 EP02、删除 EP01
+        try makeFile("番A EP02.mkv", in: dirA)
+        try FileManager.default.removeItem(at: dirA.appendingPathComponent("番A EP01.mkv"))
+        XCTAssertTrue(library.rescanFolder(dirA.path))
+
+        let seriesA = try XCTUnwrap(library.series.first { $0.displayName == "番A" })
+        XCTAssertEqual(seriesA.files.count, 1)
+        XCTAssertEqual(seriesA.sortedFiles.first?.episodeNumber, 2)
+
+        // B 不受影响
+        let seriesB = try XCTUnwrap(library.series.first { $0.displayName == "番B" })
+        XCTAssertEqual(seriesB.files.count, 1)
+        XCTAssertEqual(seriesB.sortedFiles.first?.episodeNumber, 1)
+    }
+
+    func testRescanFolderKeepsBindingAndAddsNewSeries() throws {
+        let root = tempDir.appendingPathComponent("库")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let animeDir = root.appendingPathComponent("番A")
+        try FileManager.default.createDirectory(at: animeDir, withIntermediateDirectories: true)
+        try makeFile("番A EP01.mkv", in: animeDir)
+
+        let library = MediaLibrary(storeURL: tempDir.appendingPathComponent("lib.json"))
+        library.addFolder(root.path)
+        library.rescan()
+
+        let key = try XCTUnwrap(library.series.first?.seriesKey)
+        XCTAssertTrue(library.setBinding(seriesKey: key, subjectID: 999))
+
+        // 单目录重扫：保留关联 + 该目录下新增一部番
+        let newDir = root.appendingPathComponent("番B")
+        try FileManager.default.createDirectory(at: newDir, withIntermediateDirectories: true)
+        try makeFile("番B EP01.mkv", in: newDir)
+        XCTAssertTrue(library.rescanFolder(root.path))
+
+        let seriesA = try XCTUnwrap(library.series.first { $0.displayName == "番A" })
+        XCTAssertEqual(seriesA.subjectID, 999, "单目录重扫不应丢失关联")
+        XCTAssertEqual(seriesA.matchState, .matched)
+        XCTAssertEqual(library.series.count, 2, "该目录下新增的番应被纳入")
+    }
+
+    func testOwningFolder() throws {
+        let root = tempDir.appendingPathComponent("库")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let animeDir = root.appendingPathComponent("番A")
+        try FileManager.default.createDirectory(at: animeDir, withIntermediateDirectories: true)
+        try makeFile("番A EP01.mkv", in: animeDir)
+
+        let library = MediaLibrary(storeURL: tempDir.appendingPathComponent("lib.json"))
+        library.addFolder(root.path)
+        library.rescan()
+
+        let key = try XCTUnwrap(library.series.first?.seriesKey)
+        XCTAssertEqual(library.owningFolder(of: key), MediaLibrary.canonicalPath(root.path))
+        // seriesKey 本身是已添加目录时直接用
+        XCTAssertEqual(library.owningFolder(of: MediaLibrary.canonicalPath(root.path)), MediaLibrary.canonicalPath(root.path))
+    }
 }

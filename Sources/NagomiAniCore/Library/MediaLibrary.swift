@@ -150,6 +150,57 @@ public final class MediaLibrary: @unchecked Sendable {
         save()
     }
 
+    /// 只重扫某个目录：以磁盘为准更新该目录下的系列（补新集/删消失文件），
+    /// 保留 Bangumi 关联，其他目录的系列不动。返回 false 表示目录不存在。
+    @discardableResult
+    public func rescanFolder(_ path: String) -> Bool {
+        let standard = Self.canonicalPath(path)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: standard, isDirectory: &isDir), isDir.boolValue else {
+            return false
+        }
+
+        var found: [String: Series] = [:]
+        scan(folder: standard, into: &found)
+        for key in found.keys {
+            var seen = Set<String>()
+            found[key]?.files.removeAll { !seen.insert($0.path).inserted }
+        }
+
+        let scannedKeys = Set(found.keys)
+        var merged: [Series] = []
+        for series in store.series {
+            if scannedKeys.contains(series.seriesKey) {
+                // 该目录下的系列：以磁盘为准重建文件，保留 Bangumi 关联
+                guard var fresh = found[series.seriesKey] else { continue }
+                fresh.subjectID = series.subjectID
+                fresh.matchState = series.matchState
+                merged.append(fresh)
+                found[series.seriesKey] = nil
+            } else {
+                merged.append(series)
+            }
+        }
+        // 该目录下新增的系列（此前不在库中）
+        for key in found.keys.sorted() {
+            guard let series = found[key], !series.files.isEmpty else { continue }
+            merged.append(series)
+        }
+
+        store.series = merged
+        save()
+        return true
+    }
+
+    /// 某部番所属的根目录：seriesKey 本身是目录则用它，
+    /// 否则取 folders 中最近的父目录
+    public func owningFolder(of seriesKey: String) -> String? {
+        if store.folders.contains(seriesKey) { return seriesKey }
+        return store.folders
+            .filter { seriesKey.hasPrefix($0 + "/") }
+            .max { $0.count < $1.count }
+    }
+
     private func scan(folder: String, into found: inout [String: Series]) {
         let folderURL = URL(fileURLWithPath: folder, isDirectory: true)
         let keys: [URLResourceKey] = [.isRegularFileKey, .isHiddenKey]

@@ -57,6 +57,16 @@ final class MPVOpenGLView: NSOpenGLView {
         needsDisplay = true
     }
 
+    /// 页面切换（PlayerView 销毁/重建）导致视图重新挂到窗口时，
+    /// 重新绑定 GL 上下文并触发重绘，避免渲染失效
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            openGLContext?.makeCurrentContext()
+            needsDisplay = true
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let renderContext else { return }
         openGLContext?.makeCurrentContext()

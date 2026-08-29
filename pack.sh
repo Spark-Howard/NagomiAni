@@ -53,7 +53,7 @@ PLIST
 
 # 二进制 + 图标
 cp "$BUILD_DIR/${APP_NAME}" "$STAGE/${APP_NAME}.app/Contents/MacOS/"
-cp .build/icon/AppIcon.icns "$STAGE/${APP_NAME}.app/Contents/Resources/"
+cp Assets/AppIcon.icns "$STAGE/${APP_NAME}.app/Contents/Resources/"
 
 # libmpv 依赖闭包（72 个 dylib，IINA 构建，@rpath 互链）
 cp Vendor/libmpv/*.dylib "$STAGE/${APP_NAME}.app/Contents/Frameworks/"

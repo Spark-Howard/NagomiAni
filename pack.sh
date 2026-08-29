@@ -67,17 +67,29 @@ echo "▸ 3/5 签名（测试版 ad-hoc 签名）"
 codesign --force --deep --sign - \
     "$STAGE/${APP_NAME}.app"
 
-echo "▸ 4/5 制作 dmg（拖拽安装引导：App 图标 + 应用程序快捷方式）"
+echo "▸ 4/5 制作 dmg（引导式安装界面）"
 mkdir -p "$DIST"
 rm -f "$DIST/$DMG_NAME"
 
-# 在 dmg 中放入 /Applications 符号链接作为拖拽安装目标
-# （hdiutil 会保留 symlink，Finder 中显示为可拖入的「应用程序」文件夹）
-ln -sf /Applications "$STAGE/Applications"
-
-# 源目录含 NagomiAni.app + Applications 链接，一起打包
-hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" \
-    -ov -format UDZO "$DIST/$DMG_NAME"
+# create-dmg：生成标准拖拽安装界面（背景图 + App 图标 + 箭头 + Applications 快捷方式）
+if command -v create-dmg >/dev/null 2>&1; then
+    create-dmg \
+        --volname "NagomiAni" \
+        --volicon "Assets/AppIcon.icns" \
+        --background "Assets/dmg_bg.png" \
+        --window-size 640 400 \
+        --icon "NagomiAni.app" 200 180 \
+        --app-drop-link 480 180 \
+        "$(pwd)/$DIST/$DMG_NAME" "$STAGE/" || {
+            echo "  ⚠ create-dmg 失败，回退到基础 dmg（含 Applications 快捷方式）"
+            ln -sf /Applications "$STAGE/Applications"
+            hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" -ov -format UDZO "$DIST/$DMG_NAME"
+        }
+else
+    echo "  ⚠ 未安装 create-dmg（brew install create-dmg），使用基础 dmg"
+    ln -sf /Applications "$STAGE/Applications"
+    hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" -ov -format UDZO "$DIST/$DMG_NAME"
+fi
 
 echo "▸ 5/5 完成"
 echo "──────────────────────────────────────"

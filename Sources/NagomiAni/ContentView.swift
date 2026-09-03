@@ -32,12 +32,14 @@ struct ContentView: View {
             updateWindowTitle()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
-            withAnimation(.easeOut(duration: 0.2)) { isFullScreen = true }
-            applyFullScreenStyle(true)
+            // 注意：不用 withAnimation 包裹 —— 全屏过渡期间动画化侧边栏增删会让
+            // 窗口在约束更新递归里反复标脏（详见 scheduleApplyFullScreenStyle 注释）
+            isFullScreen = true
+            scheduleApplyFullScreenStyle(true)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
-            withAnimation(.easeOut(duration: 0.2)) { isFullScreen = false }
-            applyFullScreenStyle(false)
+            isFullScreen = false
+            scheduleApplyFullScreenStyle(false)
         }
     }
 
@@ -50,6 +52,25 @@ struct ContentView: View {
             title = "NagomiAni"
         }
         NSApp.windows.first(where: { $0.isVisible })?.title = title
+    }
+
+    /// 全屏样式改动延后到下一 runloop 再执行。
+    ///
+    /// 崩溃根因：若在 didEnter/didExitFullScreen 通知回调内**同步**修改窗口
+    /// styleMask（增删 .fullSizeContentView）或 titlebarAppearsTransparent，
+    /// 会改变 contentLayoutRect → SwiftUI 的 NSHostingView 在 AppKit 的
+    /// “Update Constraints in Window” 显示周期里反复被标为需要再次更新约束，
+    /// 次数随每次进出全屏累积，一旦超过窗口内视图数量 AppKit 即抛异常
+    /// （NSGenericException: The window has been marked as needing another
+    /// Update Constraints in Window pass …），进程闪退。
+    /// 把改动推迟到回调返回之后（独立 runloop tick），不再嵌进该递归里。
+    private func scheduleApplyFullScreenStyle(_ full: Bool) {
+        // ContentView 是 struct（值语义），闭包捕获视图值本身不产生引用环；
+        // applyFullScreenStyle 内部只用 NSApp，不依赖捕获的视图状态
+        let apply = applyFullScreenStyle
+        DispatchQueue.main.async {
+            apply(full)
+        }
     }
 
     /// 全屏时让内容铺满整个屏幕（标题栏区域透明化、无白框），

@@ -2,6 +2,14 @@ import Foundation
 import SwiftUI
 import NagomiAniCore
 
+/// 搜索页“最近更新”的一天分组（今天在最前，前 6 天依次向后）
+struct WeekUpdateSection: Identifiable {
+    let id: String        // yyyy-MM-dd
+    let title: String     // “今天” 或 “周一 … 周日”
+    let dateText: String  // 如 “9月5日”
+    let items: [Subject]
+}
+
 /// 浏览/搜索页面的状态模型：搜索词条 → 查看 Bangumi 剧目详情
 @MainActor
 final class SearchViewModel: ObservableObject {
@@ -24,15 +32,15 @@ final class SearchViewModel: ObservableObject {
     @Published var collections: [Int: SubjectCollectionType] = [:]
     @Published var collectionMessage: String?
 
-    // MARK: 今日更新（Bangumi 放送日历）
-    /// 今天（本地星期）在播的动画
-    @Published var todayAnime: [Subject] = []
-    @Published var isLoadingToday = false
-    @Published var todayMessage: String?
+    // MARK: 最近更新（过去一周，Bangumi 放送日历）
+    /// 最近 7 天每天在播动画（今天在最前，含空档日）
+    @Published var weekUpdates: [WeekUpdateSection] = []
+    @Published var isLoadingWeek = false
+    @Published var weekMessage: String?
 
     private var client: BangumiClient?
     /// 已拉取过的日历日期（yyyy-MM-dd）：同一天内不重复请求
-    private var todayLoadedKey: String?
+    private var weekLoadedKey: String?
 
     init() {
         Task { await prepareClient() }
@@ -43,7 +51,7 @@ final class SearchViewModel: ObservableObject {
         Task {
             await prepareClient()
             await loadMyCollections()
-            await loadToday()
+            await loadWeek()
         }
     }
 
@@ -53,50 +61,61 @@ final class SearchViewModel: ObservableObject {
         await loadMyCollections()
     }
 
-    // MARK: - 今日更新
+    // MARK: - 最近更新（过去一周）
 
-    /// 拉取本周放送日历并取今天在播的动画；同一天只请求一次
-    func loadToday(force: Bool = false) async {
+    /// 拉取放送日历，整理成“今天 → 前 6 天”每天动画列表；同一天只请求一次
+    func loadWeek(force: Bool = false) async {
         let key = Self.currentDateKey()
-        guard force || todayLoadedKey != key || todayAnime.isEmpty else { return }
-        guard !isLoadingToday else { return }
+        guard force || weekLoadedKey != key || weekUpdates.isEmpty else { return }
+        guard !isLoadingWeek else { return }
         if client == nil { await prepareClient() }
-        isLoadingToday = true
-        todayMessage = nil
-        defer { isLoadingToday = false }
+        isLoadingWeek = true
+        weekMessage = nil
+        defer { isLoadingWeek = false }
         do {
             let api = client ?? BangumiClient()
             let days = try await api.calendar()
-            let target = Self.todayWeekdayID()
-            let items = days.first { ($0.weekday?.id ?? -1) == target }?.items ?? []
-            todayAnime = items.filter { $0.type == .anime || $0.type == nil }
-            todayLoadedKey = key
+            let cal = Calendar.current
+            let weekdayCN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+            let dayFormatter = DateFormatter()
+            dayFormatter.dateFormat = "M月d日"
+            let keyFormatter = DateFormatter()
+            keyFormatter.dateFormat = "yyyy-MM-dd"
+
+            var sections: [WeekUpdateSection] = []
+            // 今天在最上，依次往前 6 天（越新越靠前）
+            for ago in 0...6 {
+                let date = cal.date(byAdding: .day, value: -ago, to: Date()) ?? Date()
+                let weekday = Self.bangumiWeekdayID(for: date)
+                let items = (days.first { $0.weekday?.id == weekday }?.items ?? [])
+                    .filter { $0.type == .anime || $0.type == nil }
+                sections.append(WeekUpdateSection(
+                    id: keyFormatter.string(from: date),
+                    title: ago == 0 ? "今天" : weekdayCN[weekday - 1],
+                    dateText: dayFormatter.string(from: date),
+                    items: items
+                ))
+            }
+            weekUpdates = sections
+            weekLoadedKey = key
         } catch {
-            todayMessage = "今日更新加载失败：\(Self.describe(error))"
+            weekMessage = "最近更新加载失败：\(Self.describe(error))"
         }
     }
 
-    func retryToday() {
-        Task { await loadToday(force: true) }
+    func retryWeek() {
+        Task { await loadWeek(force: true) }
     }
 
     /// Bangumi 日历的 weekday.id：1=周一 … 7=周日
-    static func todayWeekdayID() -> Int {
-        let weekday = Calendar.current.component(.weekday, from: Date()) // 1=周日 … 7=周六
+    static func bangumiWeekdayID(for date: Date) -> Int {
+        let weekday = Calendar.current.component(.weekday, from: date) // 1=周日 … 7=周六
         return weekday == 1 ? 7 : weekday - 1
     }
 
     static func currentDateKey() -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
-    }
-
-    /// 今日更新模块标题里的日期，如 “9月5日 周六”
-    static func todayTitle() -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "zh_CN")
-        f.dateFormat = "M月d日 EEEE"
         return f.string(from: Date())
     }
 

@@ -53,6 +53,11 @@ public final class BangumiClient: @unchecked Sendable {
         try await send(get("/v0/me"))
     }
 
+    /// 任意用户资料（GET /v0/users/{username}，公开接口；用于补全联系人的头像/昵称）
+    public func userProfile(username: String) async throws -> BangumiUser {
+        try await send(get("/v0/users/\(username)"))
+    }
+
     /// 获取条目详情（GET /v0/subjects/{id}，服务端缓存 300s）
     public func subject(id: Int) async throws -> Subject {
         try await send(get("/v0/subjects/\(id)"))

@@ -7,11 +7,13 @@ struct SearchPage: View {
     @ObservedObject var model: SearchViewModel
 
     var body: some View {
-        Group {
+        ZStack {
+            // 列表常驻，保持滚动位置
+            searchListView
+            // 详情以覆盖层形式展示：返回时列表不重建，滚动条位置保留
             if let subject = model.selected {
                 SubjectDetailView(model: model, subject: subject)
-            } else {
-                searchListView
+                    .background(Color(nsColor: .windowBackgroundColor))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -26,8 +28,6 @@ struct SearchPage: View {
 
     private var searchListView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            todaySection
-
             HStack(spacing: 8) {
                 TextField("搜索 Bangumi 条目（动画名 / 原名）", text: $model.keyword)
                     .textFieldStyle(.roundedBorder)
@@ -40,7 +40,7 @@ struct SearchPage: View {
                 .disabled(model.keyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearching)
             }
             .padding(.horizontal, 16)
-            .padding(.top, 8)
+            .padding(.top, 12)
 
             if model.isSearching {
                 ProgressView("搜索中…")
@@ -51,18 +51,7 @@ struct SearchPage: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16)
-            } else if model.results.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 40))
-                        .foregroundStyle(.tertiary)
-                    Text("输入动画名称，搜索 Bangumi 上的词条")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.top, 80)
-            } else {
+            } else if !model.results.isEmpty {
                 List(model.results) { subject in
                     Button {
                         model.open(subject: subject)
@@ -72,65 +61,113 @@ struct SearchPage: View {
                     .buttonStyle(.plain)
                 }
                 .listStyle(.inset)
+            } else {
+                // 默认态：搜索框下方展示“最近更新（过去一周）”
+                weekListView
             }
-            Spacer(minLength: 0)
         }
     }
 
-    // MARK: - 今日更新
+    // MARK: - 最近更新（过去一周）
 
-    /// “今日更新”模块：Bangumi 放送日历里今天在播的动画（横向卡片列表）
     @ViewBuilder
-    private var todaySection: some View {
+    private var weekListView: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "calendar.badge.clock")
+                Image(systemName: "calendar")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.accentColor)
-                Text("今日更新")
+                Text("最近更新")
                     .font(.headline)
-                Text(SearchViewModel.todayTitle())
+                Text("过去一周")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                if model.isLoadingToday {
+                if model.isLoadingWeek {
                     ProgressView()
                         .controlSize(.small)
-                } else if model.todayMessage != nil {
-                    Button("重试") { model.retryToday() }
+                } else {
+                    Button("刷新") { model.retryWeek() }
                         .controlSize(.small)
                 }
             }
             .padding(.horizontal, 16)
+            .padding(.top, 4)
 
-            if let message = model.todayMessage {
-                Text(message)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 16)
-            } else if model.todayAnime.isEmpty && !model.isLoadingToday {
-                Text("今天暂时没有条目更新")
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 16)
+            if let message = model.weekMessage {
+                HStack(spacing: 8) {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                    Button("重试") { model.retryWeek() }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+            } else if model.isLoadingWeek && model.weekUpdates.isEmpty {
+                ProgressView("加载最近更新…")
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 30)
             } else {
+                ScrollView {
+                    // 用 VStack（非懒加载）：嵌套横向滚动时避免懒容器测量出错导致某些天不渲染
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(model.weekUpdates) { section in
+                            weekSection(section)
+                        }
+                    }
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+    }
+
+    /// 一天的分组：星期徽章 + 日期 + 该日条目（横向大图卡片）
+    private func weekSection(_ section: WeekUpdateSection) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text(section.title)
+                    .font(.caption.bold())
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(
+                        section.title == "今天" ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.12),
+                        in: Capsule()
+                    )
+                    .foregroundStyle(section.title == "今天" ? Color.accentColor : Color.primary)
+                Text(section.dateText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(section.items.count) 部")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 16)
+
+            if section.items.isEmpty {
+                Text("当日暂无更新记录")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 20)
+                    .padding(.bottom, 2)
+            } else {
+                // 当日更新横向展示，大封面（HStack 非懒加载，保证每组都能渲染）
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 10) {
-                        ForEach(model.todayAnime) { subject in
-                            todayCard(subject)
+                    HStack(alignment: .top, spacing: 12) {
+                        ForEach(section.items) { subject in
+                            weekCoverCard(subject)
                         }
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 2)
+                    .padding(.bottom, 4)
                 }
-                .frame(height: 148)
             }
         }
-        .padding(.top, 12)
+        .padding(.vertical, 6)
     }
 
-    /// 今日更新卡片：封面 + 标题，点击进入条目详情
-    private func todayCard(_ subject: Subject) -> some View {
+    /// 大封面卡片：大图 + 标题，点击进入详情
+    private func weekCoverCard(_ subject: Subject) -> some View {
         Button {
             model.open(subject: subject)
         } label: {
@@ -142,7 +179,7 @@ struct SearchPage: View {
                         .fill(Color.gray.opacity(0.15))
                         .overlay { Image(systemName: "film").foregroundStyle(.secondary) }
                 }
-                .frame(width: 78, height: 106)
+                .frame(width: 112, height: 152)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 Text(subject.nameCN ?? subject.name ?? "?")
@@ -150,7 +187,21 @@ struct SearchPage: View {
                     .foregroundStyle(.primary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
-                    .frame(width: 78, alignment: .leading)
+                    .frame(width: 112, alignment: .leading)
+
+                HStack(spacing: 6) {
+                    if let score = subject.rating?.score {
+                        Text("★ \(Self.formatScore(score))")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                    if let eps = subject.totalEpisodes {
+                        Text("\(eps) 话")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 112, alignment: .leading)
             }
         }
         .buttonStyle(.plain)
@@ -230,6 +281,8 @@ struct SubjectDetailView: View {
     @State private var pendingAction: CollectionAction?
     /// 资料表（infobox）是否展开全部条目（信息多时默认折叠前几条）
     @State private var showAllInfobox = false
+    /// 联系人（聊天板块数据；讨论/评论作者可一键加入）
+    @EnvironmentObject private var contacts: ContactsStore
 
     enum CollectionAction {
         case set(SubjectCollectionType)
@@ -725,40 +778,40 @@ struct SubjectDetailView: View {
             } else {
                 LazyVStack(spacing: 6) {
                     ForEach(topics) { topic in
-                        Button {
-                            openURL(topic.url)
-                        } label: {
-                            HStack(spacing: 10) {
-                                avatar(topic.user)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(topic.title ?? "—")
-                                        .font(.body)
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(2)
-                                    HStack(spacing: 10) {
-                                        Text(topic.user?.nickname ?? "?")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                        if let replies = topic.replies {
-                                            Text("\(replies) 回复")
-                                                .font(.caption2)
+                        HStack(alignment: .top, spacing: 4) {
+                            Button {
+                                openURL(topic.url)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    avatar(topic.user)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(topic.title ?? "—")
+                                            .font(.body)
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(2)
+                                        HStack(spacing: 10) {
+                                            Text(topic.user?.nickname ?? "?")
+                                                .font(.caption)
                                                 .foregroundStyle(.secondary)
+                                            if let replies = topic.replies {
+                                                Text("\(replies) 回复")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Text(formatDate(topic.lastpost))
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
                                         }
-                                        Text(formatDate(topic.lastpost))
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
                                     }
+                                    Spacer(minLength: 4)
                                 }
-                                Spacer()
-                                Image(systemName: "arrow.up.right")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                .padding(9)
+                                .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
                             }
-                            .padding(9)
-                            .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                            .buttonStyle(.plain)
+                            .help("在浏览器中打开讨论帖")
+                            userQuickActions(topic.user)
                         }
-                        .buttonStyle(.plain)
-                        .help("在浏览器中打开讨论帖")
                     }
                 }
             }
@@ -775,43 +828,46 @@ struct SubjectDetailView: View {
             } else {
                 LazyVStack(spacing: 6) {
                     ForEach(blogs) { blog in
-                        Button {
-                            openURL(blog.url)
-                        } label: {
-                            HStack(alignment: .top, spacing: 10) {
-                                avatar(blog.user)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(blog.title ?? "—")
-                                        .font(.body.bold())
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-                                    if let summary = blog.summary, !summary.isEmpty {
-                                        Text(summary)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(3)
-                                    }
-                                    HStack(spacing: 10) {
-                                        Text(blog.user?.nickname ?? "?")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                        if let replies = blog.replies {
-                                            Text("\(replies) 回复")
+                        HStack(alignment: .top, spacing: 4) {
+                            Button {
+                                openURL(blog.url)
+                            } label: {
+                                HStack(alignment: .top, spacing: 10) {
+                                    avatar(blog.user)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(blog.title ?? "—")
+                                            .font(.body.bold())
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                        if let summary = blog.summary, !summary.isEmpty {
+                                            Text(summary)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(3)
+                                        }
+                                        HStack(spacing: 10) {
+                                            Text(blog.user?.nickname ?? "?")
                                                 .font(.caption2)
                                                 .foregroundStyle(.secondary)
+                                            if let replies = blog.replies {
+                                                Text("\(replies) 回复")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Text(formatDate(blog.timestamp))
+                                                .font(.caption2)
+                                                .foregroundStyle(.tertiary)
                                         }
-                                        Text(formatDate(blog.timestamp))
-                                            .font(.caption2)
-                                            .foregroundStyle(.tertiary)
                                     }
+                                    Spacer(minLength: 4)
                                 }
-                                Spacer()
+                                .padding(10)
+                                .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
                             }
-                            .padding(10)
-                            .background(Color.gray.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                            .buttonStyle(.plain)
+                            .help("在浏览器中打开评论")
+                            userQuickActions(blog.user)
                         }
-                        .buttonStyle(.plain)
-                        .help("在浏览器中打开评论")
                     }
                 }
             }
@@ -819,6 +875,26 @@ struct SubjectDetailView: View {
     }
 
     // MARK: - 工具
+
+    /// 作者快捷操作：一键把作者加入「聊天」模块的好友列表（聊天在聊天板块内嵌网页完成）
+    @ViewBuilder
+    private func userQuickActions(_ user: LegacyUser?) -> some View {
+        if let username = user?.username, !username.isEmpty {
+            let added = contacts.contains(username)
+            VStack(spacing: 3) {
+                Button {
+                    contacts.add(username: username, nickname: user?.nickname ?? "")
+                } label: {
+                    Image(systemName: added ? "checkmark.circle.fill" : "plus.circle")
+                        .font(.system(size: 13))
+                        .foregroundStyle(added ? Color.green : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(added ? "已在好友列表（聊天板块）中" : "加入好友列表（聊天板块）")
+            }
+            .padding(.vertical, 2)
+        }
+    }
 
     private func avatar(_ user: LegacyUser?) -> some View {
         AsyncImage(url: SearchPage.imageURL(user?.avatar?.small)) { image in

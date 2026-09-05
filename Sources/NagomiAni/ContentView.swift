@@ -6,6 +6,9 @@ struct ContentView: View {
     @StateObject private var account = AccountViewModel()
     @StateObject private var library = LibraryViewModel()
     @StateObject private var search = SearchViewModel()
+    @StateObject private var contacts = ContactsStore()
+    /// 常驻的聊天网页控制器（切板块回来不丢页面/登录态）
+    @StateObject private var webChat = WebChatController()
     @State private var selection: SidebarItem? = .player
     /// 全屏时隐藏侧边栏，让视频占满整个屏幕（无 UI 边框）
     @State private var isFullScreen = false
@@ -20,6 +23,7 @@ struct ContentView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .environmentObject(contacts)
         // 不用窗口工具栏：播放器/番库/Bangumi 三页顶部（标题栏）高度保持一致，
         // 避免切换页面时 UI 上下跳动（"打开文件"按钮已移入播放器顶部栏）
         .onAppear {
@@ -114,6 +118,8 @@ struct ContentView: View {
             }
         case .bangumi:
             BangumiPage(model: account)
+        case .chat:
+            ChatPage(account: account, web: webChat)
         case .search:
             SearchPage(model: search)
         case .player, nil:
@@ -181,6 +187,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case library
     case search
     case bangumi
+    case chat
 
     var id: String { rawValue }
 
@@ -190,6 +197,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .library: return "番库"
         case .search: return "搜索"
         case .bangumi: return "Bangumi"
+        case .chat: return "聊天"
         }
     }
 
@@ -199,6 +207,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .library: return "books.vertical"
         case .search: return "magnifyingglass"
         case .bangumi: return "person.crop.circle"
+        case .chat: return "message"
         }
     }
 }

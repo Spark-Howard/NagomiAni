@@ -98,7 +98,32 @@ public final class BangumiAuth: @unchecked Sendable {
         guard let refreshToken, !refreshToken.isEmpty else {
             throw BangumiError.unauthorized
         }
-        try await exchange(grantType: "refresh_token", refreshToken: refreshToken)
+        // 同一进程内多个 BangumiAuth 实例可能同时刷新同一个 refresh_token：
+        // 服务端轮换会让后刷新者 401 → 用全局 actor 串行化；后到者重读文件直接采用更新结果
+        try await AuthRefreshGate.shared.run { [self] in
+            if let record = AuthTokenFileStore.load(),
+               let fileRefresh = record.refreshToken, !fileRefresh.isEmpty,
+               fileRefresh != self.refreshToken,
+               let fileAccess = record.accessToken, !fileAccess.isEmpty {
+                // 已有其它实例刷新完成：直接采用文件里的新令牌，不再发起重复刷新
+                self.adopt(record)
+                return
+            }
+            guard let myRefresh = self.refreshToken, !myRefresh.isEmpty else {
+                throw BangumiError.unauthorized
+            }
+            try await self.exchange(grantType: "refresh_token", refreshToken: myRefresh)
+        }
+    }
+
+    /// 采用文件里其它实例已刷新好的令牌（避免重复请求 / 轮换冲突）
+    private func adopt(_ record: AuthTokenRecord) {
+        accessToken = record.accessToken
+        refreshToken = record.refreshToken
+        userID = record.userID
+        expiresAt = record.expiresAt
+        if let storedID = record.clientID { clientID = storedID }
+        if let storedSecret = record.clientSecret { clientSecret = storedSecret }
     }
 
     // MARK: - Token 交换
@@ -332,6 +357,16 @@ public final class BangumiAuth: @unchecked Sendable {
 }
 
 // MARK: - 令牌文件存储（跨实例串行化）
+
+/// 串行化进程内 token 刷新：refresh_token 会被服务端轮换，多个实例并发刷新时
+/// 只有一个真正发起网络请求，其它实例等待后直接采用文件里已更新的令牌。
+private actor AuthRefreshGate {
+    static let shared = AuthRefreshGate()
+
+    func run<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
+        try await body()
+    }
+}
 
 /// auth.json 的记录结构（文件级共享；多个 BangumiAuth 实例都读写同一份）
 private struct AuthTokenRecord: Codable {

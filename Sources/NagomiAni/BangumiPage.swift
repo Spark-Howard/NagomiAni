@@ -40,6 +40,7 @@ struct BangumiPage: View {
     // MARK: - 登录面板（App 内嵌授权，与“聊天”共享网页 Cookie）
 
     private func startLogin() {
+        guard !showLoginPanel, !model.isLoading else { return }
         showLoginPanel = true
         Task {
             await model.loginInEmbeddedWebview { url in

@@ -19,7 +19,8 @@ STAGE=".build/package"
 DIST="dist"
 
 echo "▸ 1/5 编译 release（${VERSION} build ${BUILD}）"
-swift build -c release
+# --disable-sandbox：沙箱受限环境（CI/本开发沙箱）需要；普通终端下无副作用
+swift build -c release --disable-sandbox
 
 echo "▸ 2/5 组装 ${APP_NAME}.app"
 rm -rf "$STAGE" "$DIST"

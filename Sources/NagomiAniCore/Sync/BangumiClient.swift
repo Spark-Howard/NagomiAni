@@ -32,7 +32,7 @@ public final class BangumiClient: @unchecked Sendable {
     /// 访问令牌（OAuth 登录后设置）
     public var accessToken: String?
     /// User-Agent（官方要求：开发者 ID + 应用名 + 版本 + 项目主页，否则默认 UA 可能被禁用）
-    public var userAgent: String = "Spark-Howard/NagomiAni/0.1.0 (macOS) (https://github.com/Spark-Howard/NagomiAni)"
+    public var userAgent: String = "Spark-Howard/NagomiAni/1.0.0 (macOS) (https://github.com/Spark-Howard/NagomiAni)"
 
     private let baseURL = URL(string: "https://api.bgm.tv")!
     private let session: URLSession

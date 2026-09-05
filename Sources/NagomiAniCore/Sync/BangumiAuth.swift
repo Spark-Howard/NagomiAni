@@ -159,7 +159,7 @@ public final class BangumiAuth: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("Spark-Howard/NagomiAni/0.1.0 (macOS) (https://github.com/Spark-Howard/NagomiAni)", forHTTPHeaderField: "User-Agent")
+        request.setValue("Spark-Howard/NagomiAni/1.0.0 (macOS) (https://github.com/Spark-Howard/NagomiAni)", forHTTPHeaderField: "User-Agent")
         request.httpBody = body.query?.data(using: .utf8)
 
         let (data, response): (Data, URLResponse)

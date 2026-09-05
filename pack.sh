@@ -48,6 +48,14 @@ cat > "$STAGE/${APP_NAME}.app/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.video</string>
+    <!-- Bangumi 封面 CDN (lain.bgm.tv) 返回的是明文 http；App 内嵌授权/网页也可能访问
+         http://127.0.0.1 —— 不放开 ATS 会导致“swift run 正常、打包版图片全不显示” -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key><true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
+        <key>NSAllowsLocalNetworking</key><true/>
+    </dict>
 </dict>
 </plist>
 PLIST

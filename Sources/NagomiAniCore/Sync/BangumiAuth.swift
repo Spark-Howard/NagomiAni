@@ -54,8 +54,15 @@ public final class BangumiAuth: @unchecked Sendable {
 
     // MARK: - 登录
 
-    /// 完整登录流程：打开浏览器授权 → 回环回调收 code → 换 token
+    /// 完整登录流程（默认在系统浏览器授权）→ 回环回调收 code → 换 token
     public func login() async throws {
+        try await login(openURL: { NSWorkspace.shared.open($0) })
+    }
+
+    /// 完整登录流程，但授权页由调用方指定的方式打开
+    /// （例如放进与“聊天网页”共享 Cookie 的内嵌 WebView —— 这样授权成功后，
+    /// bgm.tv 网页登录会话也写入同一 Cookie 存储，聊天不再需要单独登录）
+    public func login(openURL opening: @escaping (URL) -> Void) async throws {
         let state = UUID().uuidString
         let port = Self.callbackPort(from: config.redirectURI)
 
@@ -68,8 +75,8 @@ public final class BangumiAuth: @unchecked Sendable {
         ]
         guard let url = comps.url else { throw BangumiError.invalidURL }
 
-        // 打开系统浏览器让用户授权
-        NSWorkspace.shared.open(url)
+        // 按调用方指定的方式打开授权页
+        opening(url)
 
         // 等待本地回调服务器收到 code
         let code = try await waitForCallback(port: port, expectedState: state)

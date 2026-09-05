@@ -47,6 +47,23 @@ final class AccountViewModel: ObservableObject {
         }
     }
 
+    /// 在 App 内嵌网页（与聊天共享同一 Cookie 存储）里完成授权登录：
+    /// 授权页加载交给 loadURL 处理；登录成功后网页会话 Cookie 与聊天互通
+    func loginInEmbeddedWebview(loadURL: @escaping (URL) -> Void) async {
+        isLoading = true
+        errorMessage = nil
+        defer { isLoading = false }
+
+        do {
+            guard let auth else { return }
+            try await auth.login(openURL: loadURL)
+            client.accessToken = auth.accessToken
+            await refresh()
+        } catch {
+            errorMessage = Self.describe(error)
+        }
+    }
+
     func logout() {
         auth?.logout()
         client.accessToken = nil

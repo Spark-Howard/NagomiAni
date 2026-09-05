@@ -7,6 +7,8 @@ public enum BangumiError: LocalizedError {
     case decoding(String)
     case unauthorized
     case httpStatus(Int, String?)
+    case loginCancelled
+    case loginTimeout
 
     public var errorDescription: String? {
         switch self {
@@ -14,6 +16,8 @@ public enum BangumiError: LocalizedError {
         case .network: return "网络请求失败"
         case .decoding(let detail): return detail.isEmpty ? "响应解析失败" : "响应解析失败：\(detail)"
         case .unauthorized: return "登录已失效，请重新登录"
+        case .loginCancelled: return "已取消登录"
+        case .loginTimeout: return "登录超时：未在浏览器完成授权，请重试"
         case .httpStatus(let code, let detail):
             if let detail, !detail.isEmpty {
                 return "请求失败（HTTP \(code)）：\(detail)"
@@ -60,6 +64,12 @@ public final class BangumiClient: @unchecked Sendable {
         try await send(get("/subject/\(id)", query: [
             .init(name: "responseGroup", value: "large")
         ]))
+    }
+
+    /// 放送日历（GET /calendar，无需登录）：本周 7 天、每天在播条目
+    /// 返回数组下标顺序即周一起始；每条 weekday.id 1=周一 … 7=周日
+    public func calendar() async throws -> [CalendarDay] {
+        try await send(get("/calendar"))
     }
 
     /// 搜索条目（POST /v0/search/subjects，实验性 API）

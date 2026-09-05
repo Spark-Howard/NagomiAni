@@ -26,14 +26,30 @@ public final class BangumiAuth: @unchecked Sendable {
     public private(set) var refreshToken: String?
     public private(set) var userID: Int?
     public private(set) var expiresAt: Date?
+    /// 应用凭证（App ID / Secret）：随令牌一并存 auth.json，跨进程/跨启动共享。
+    /// 优先取文件里保存的；没有时才回退到构造时传入的 config
+    /// （这样 `swift run` 与打包 .app 的 UserDefaults 域不同也不影响）。
+    public private(set) var clientID: String?
+    public private(set) var clientSecret: String?
 
     public var isLoggedIn: Bool { accessToken != nil }
 
     private let config: BangumiAppConfig
 
+    private var effectiveClientID: String { clientID ?? config.clientID }
+    private var effectiveClientSecret: String { clientSecret ?? config.clientSecret }
+
     public init(config: BangumiAppConfig) {
         self.config = config
         loadTokens()
+        // 迁移兼容：旧 auth.json 里没有凭证，但本次调用方带上了 config（来自任一
+        // UserDefaults 域）→ 补写进文件，之后所有进程都能用它刷新令牌
+        if clientID == nil || clientSecret == nil,
+           !config.clientID.isEmpty, !config.clientSecret.isEmpty {
+            clientID = config.clientID
+            clientSecret = config.clientSecret
+            saveTokens()
+        }
     }
 
     // MARK: - 登录
@@ -106,8 +122,8 @@ public final class BangumiAuth: @unchecked Sendable {
     private func exchange(grantType: String, code: String? = nil, state: String? = nil, refreshToken: String? = nil) async throws {
         var body = URLComponents()
         var items = [URLQueryItem(name: "grant_type", value: grantType)]
-        items.append(.init(name: "client_id", value: config.clientID))
-        items.append(.init(name: "client_secret", value: config.clientSecret))
+        items.append(.init(name: "client_id", value: effectiveClientID))
+        items.append(.init(name: "client_secret", value: effectiveClientSecret))
         items.append(.init(name: "redirect_uri", value: config.redirectURI))
         if let code { items.append(.init(name: "code", value: code)) }
         if let state { items.append(.init(name: "state", value: state)) }
@@ -149,121 +165,150 @@ public final class BangumiAuth: @unchecked Sendable {
 
     // MARK: - 令牌持久化（文件存储，避免 Keychain 弹窗）
 
-    private struct AuthTokenRecord: Codable {
-        var accessToken: String?
-        var refreshToken: String?
-        var userID: Int?
-        var expiresAt: Date?
-    }
-
-    private var tokenURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("NagomiAni", isDirectory: true)
-        return dir.appendingPathComponent("auth.json")
-    }
-
+    /// 读写都收敛到 AuthTokenFileStore（全实例共享一条串行队列），避免多实例并发写坏文件
     private func loadTokens() {
-        guard let data = try? Data(contentsOf: tokenURL),
-              let record = try? JSONDecoder().decode(AuthTokenRecord.self, from: data) else {
-            return
-        }
+        guard let record = AuthTokenFileStore.load() else { return }
         accessToken = record.accessToken
         refreshToken = record.refreshToken
         userID = record.userID
         expiresAt = record.expiresAt
+        clientID = record.clientID
+        clientSecret = record.clientSecret
     }
 
     private func saveTokens() {
-        do {
-            let url = tokenURL
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let record = AuthTokenRecord(
-                accessToken: accessToken,
-                refreshToken: refreshToken,
-                userID: userID,
-                expiresAt: expiresAt
-            )
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = .prettyPrinted
-            let data = try encoder.encode(record)
-            try data.write(to: url, options: .atomic)
-            // 仅当前用户可读写
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } catch {
-            print("[BangumiAuth] 令牌保存失败: \(error)")
-        }
+        AuthTokenFileStore.save(AuthTokenRecord(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            userID: userID,
+            expiresAt: expiresAt,
+            clientID: clientID ?? (config.clientID.isEmpty ? nil : config.clientID),
+            clientSecret: clientSecret ?? (config.clientSecret.isEmpty ? nil : config.clientSecret)
+        ))
     }
 
     private func clearTokens() {
-        try? FileManager.default.removeItem(at: tokenURL)
+        AuthTokenFileStore.clear()
     }
 
-    // MARK: - 本地回环回调服务器
+    // MARK: - 本地回环回调服务器（可取消 + 超时兜底）
+
+    /// 登录回调专用串行队列：listener / continuation 等状态只在该队列上访问
+    private static let callbackQueue = DispatchQueue(label: "nagomiani.oauth.callback")
+    private var callbackListener: NWListener?
+    private var callbackContinuation: CheckedContinuation<String, Error>?
+    private var callbackFinished = false
+    private var callbackTimeoutWork: DispatchWorkItem?
+    /// 等待授权回调的最长时间（秒）：用户关掉浏览器授权页不授权，登录也要能退出
+    private let callbackTimeoutSeconds: TimeInterval = 90
+
+    /// 取消当前登录（用户在登录界面点「取消登录」，任意线程可调用）
+    public func cancelLogin() {
+        Self.callbackQueue.async { [weak self] in
+            self?.finishCallback(with: BangumiError.loginCancelled)
+        }
+    }
 
     private func waitForCallback(port: UInt16, expectedState: String) async throws -> String {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
-            let queue = DispatchQueue(label: "nagomiani.oauth.callback")
-            let listener: NWListener
-            do {
-                guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-                    cont.resume(throwing: BangumiError.invalidURL)
+            Self.callbackQueue.async { [weak self] in
+                guard let self else {
+                    cont.resume(throwing: BangumiError.network)
                     return
                 }
-                listener = try NWListener(using: .tcp, on: nwPort)
-            } catch {
-                cont.resume(throwing: error)
-                return
-            }
+                self.callbackContinuation = cont
+                self.callbackFinished = false
+                self.startCallbackServer(port: port, expectedState: expectedState)
 
-            var resolved = false
-
-            listener.newConnectionHandler = { connection in
-                connection.start(queue: queue)
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, _, _ in
-                    guard let data = data, !data.isEmpty else { return }
-                    let requestText = String(decoding: data, as: UTF8.self)
-                    // 解析请求行：GET /callback?code=xxx&state=yyy HTTP/1.1
-                    let parts = requestText.split(separator: " ").map(String.init)
-                    guard parts.count >= 2, let url = URL(string: parts[1]) else {
-                        Self.sendResponse(connection, status: 400, body: "bad request")
-                        return
-                    }
-
-                    guard url.path == "/callback" else {
-                        Self.sendResponse(connection, status: 404, body: "not found")
-                        return
-                    }
-
-                    let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-                    let code = items.first { $0.name == "code" }?.value
-                    let state = items.first { $0.name == "state" }?.value
-
-                    guard let code, state == expectedState else {
-                        Self.sendResponse(connection, status: 400, body: "state 校验失败")
-                        return
-                    }
-
-                    Self.sendResponse(connection, status: 200, body: """
-                    <h1>登录成功，可以关闭此页面</h1>
-                    <script>try { window.close(); } catch (e) {}</script>
-                    """)
-                    listener.cancel()
-                    if !resolved {
-                        resolved = true
-                        cont.resume(returning: code)
-                    }
+                // 超时兜底：没收到回调也能返回，登录按钮不会一直转圈
+                let timeout = DispatchWorkItem { [weak self] in
+                    self?.finishCallback(with: BangumiError.loginTimeout)
                 }
+                self.callbackTimeoutWork = timeout
+                Self.callbackQueue.asyncAfter(
+                    deadline: .now() + self.callbackTimeoutSeconds,
+                    execute: timeout
+                )
             }
-
-            listener.stateUpdateHandler = { state in
-                if case .failed = state, !resolved {
-                    resolved = true
-                    cont.resume(throwing: BangumiError.network)
-                }
-            }
-
-            listener.start(queue: queue)
         }
+    }
+
+    private func startCallbackServer(port: UInt16, expectedState: String) {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            finishCallback(with: BangumiError.invalidURL)
+            return
+        }
+        let listener: NWListener
+        do {
+            listener = try NWListener(using: .tcp, on: nwPort)
+        } catch {
+            finishCallback(with: BangumiError.network)
+            return
+        }
+        callbackListener = listener
+
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: Self.callbackQueue)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, _, _ in
+                guard let self, let data, !data.isEmpty else { return }
+                let requestText = String(decoding: data, as: UTF8.self)
+                // 解析请求行：GET /callback?code=xxx&state=yyy HTTP/1.1
+                let parts = requestText.split(separator: " ").map(String.init)
+                guard parts.count >= 2, let url = URL(string: parts[1]) else {
+                    Self.sendResponse(connection, status: 400, body: "bad request")
+                    return
+                }
+
+                guard url.path == "/callback" else {
+                    Self.sendResponse(connection, status: 404, body: "not found")
+                    return
+                }
+
+                let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                let code = items.first { $0.name == "code" }?.value
+                let state = items.first { $0.name == "state" }?.value
+
+                guard let code, state == expectedState else {
+                    Self.sendResponse(connection, status: 400, body: "state 校验失败")
+                    return
+                }
+
+                Self.sendResponse(connection, status: 200, body: """
+                <h1>登录成功，可以关闭此页面</h1>
+                <script>try { window.close(); } catch (e) {}</script>
+                """)
+                self.finishCallback(returning: code)
+            }
+        }
+
+        listener.stateUpdateHandler = { [weak self] state in
+            if case .failed = state {
+                Self.callbackQueue.async { self?.finishCallback(with: BangumiError.network) }
+            }
+        }
+
+        listener.start(queue: Self.callbackQueue)
+    }
+
+    /// 收到授权码后收尾（在 callbackQueue 上调用）
+    private func finishCallback(returning code: String) {
+        resolve(.success(code))
+    }
+
+    /// 失败收尾：取消 / 超时 / 监听失败（必须已在 callbackQueue 上调用）
+    private func finishCallback(with error: Error) {
+        resolve(.failure(error))
+    }
+
+    private func resolve(_ result: Result<String, Error>) {
+        guard !callbackFinished else { return }
+        callbackFinished = true
+        callbackTimeoutWork?.cancel()
+        callbackTimeoutWork = nil
+        callbackListener?.cancel()
+        callbackListener = nil
+        callbackContinuation?.resume(with: result)
+        callbackContinuation = nil
     }
 
     private static func sendResponse(_ connection: NWConnection, status: Int, body: String) {
@@ -283,5 +328,83 @@ public final class BangumiAuth: @unchecked Sendable {
             return UInt16(port)
         }
         return 8123
+    }
+}
+
+// MARK: - 令牌文件存储（跨实例串行化）
+
+/// auth.json 的记录结构（文件级共享；多个 BangumiAuth 实例都读写同一份）
+private struct AuthTokenRecord: Codable {
+    var accessToken: String?
+    var refreshToken: String?
+    var userID: Int?
+    var expiresAt: Date?
+    /// 应用凭证随令牌一起保存：`swift run` 与打包 .app 的 UserDefaults 域不同，
+    /// 只有放进共享文件才能保证任意入口都能刷新/换 token
+    var clientID: String?
+    var clientSecret: String?
+}
+
+/// 令牌文件的唯一读写入口。
+///
+/// 修复：登录页 / 番库 / 搜索 / 播放器各自会 new 一个 BangumiAuth，以前各自直接写
+/// auth.json，两个实例并发刷新/保存时后写者可能把“过期更早”的旧 token 回写覆盖，
+/// 导致偶发 401“登录已失效”。现在：
+/// - 所有读写经过同一条串行队列，不会并发写坏文件；
+/// - save 前对比文件已有 token：若文件里的是有效期更长（晚 30s+）的更新 token，
+///   说明是其它实例更晚刷新的结果，跳过本次覆盖。
+private enum AuthTokenFileStore {
+    static let queue = DispatchQueue(label: "nagomiani.authfile")
+
+    static var url: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("NagomiAni", isDirectory: true)
+        return dir.appendingPathComponent("auth.json")
+    }
+
+    static func load() -> AuthTokenRecord? {
+        queue.sync {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? JSONDecoder().decode(AuthTokenRecord.self, from: data)
+        }
+    }
+
+    static func save(_ record: AuthTokenRecord) {
+        queue.sync {
+            // 文件里已有"有效期更长"的 token → 那是更晚刷新的结果，保留它
+            if let existing = readCurrent(),
+               let existingToken = existing.accessToken,
+               existingToken != record.accessToken,
+               let existingExpiry = existing.expiresAt,
+               let ourExpiry = record.expiresAt,
+               existingExpiry > ourExpiry.addingTimeInterval(30) {
+                return
+            }
+            do {
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = .prettyPrinted
+                let data = try encoder.encode(record)
+                try data.write(to: url, options: .atomic)
+                // 仅当前用户可读写
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            } catch {
+                print("[BangumiAuth] 令牌保存失败: \(error)")
+            }
+        }
+    }
+
+    static func clear() {
+        queue.sync {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private static func readCurrent() -> AuthTokenRecord? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(AuthTokenRecord.self, from: data)
     }
 }

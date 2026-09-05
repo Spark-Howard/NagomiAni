@@ -97,6 +97,27 @@ struct LibraryPage: View {
                 }
             }
         }
+        // 「更新」后该番一个本地文件都不剩 → 让用户选择移动/删除
+        .alert(
+            "找不到本地文件",
+            isPresented: Binding(
+                get: { model.vanishedSeries != nil },
+                set: { if !$0 { model.dismissVanished() } }
+            ),
+            presenting: model.vanishedSeries
+        ) { series in
+            Button("我移动了位置，选择新目录") {
+                model.relocateVanishedSeries()
+            }
+            Button("已删除，移除该番", role: .destructive) {
+                model.confirmDeleteVanishedSeries()
+            }
+            Button("先不管", role: .cancel) {
+                model.dismissVanished()
+            }
+        } message: { series in
+            Text("重新扫描后找不到「\(series.displayName)」的任何本地文件。\n如果是移动到其它位置，选新目录即可保留 Bangumi 关联继续观看；如果确实删除了，将从番库移除该条目。")
+        }
     }
 
     private func seriesRow(_ series: Series) -> some View {

@@ -29,15 +29,6 @@ final class PlayerModel: ObservableObject {
     let engine = MPVPlaybackEngine()
 
     private var currentMedia: (episodeNumber: Int?, seriesKey: String)?
-    private var sharedClient: BangumiClient?
-    private lazy var auth: BangumiAuth? = {
-        let defaults = UserDefaults.standard
-        let id = defaults.string(forKey: "bangumi.clientID") ?? ""
-        let secret = defaults.string(forKey: "bangumi.clientSecret") ?? ""
-        guard !id.isEmpty, !secret.isEmpty else { return nil }
-        return BangumiAuth(config: BangumiAppConfig(clientID: id, clientSecret: secret))
-    }()
-
     private static let bindingsKey = "bangumi.bindings"       // [seriesKey: subjectID]
     private static let boundNamesKey = "bangumi.boundNames"   // [seriesKey: 显示名]
 
@@ -329,13 +320,8 @@ final class PlayerModel: ObservableObject {
     }
 
     private func bangumiClient() async -> BangumiClient? {
-        guard let auth, auth.isLoggedIn else { return nil }
-        try? await auth.refreshIfNeeded()
-        if sharedClient == nil {
-            sharedClient = BangumiClient()
-        }
-        sharedClient?.accessToken = auth.accessToken
-        return sharedClient
+        // 与番库/其他模块共用同一登录判定（auth.json），避免 defaults 域不一致导致的假"未登录"
+        await BangumiSession.makeClient()
     }
 
     private func restoreBinding() {

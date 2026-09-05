@@ -102,6 +102,25 @@ public struct BangumiUser: Codable, Sendable {
     }
 }
 
+/// 放送日历（GET /calendar）里一天的条目组：
+/// weekday.id 1=周一 … 7=周日；items 为该星期在播条目（动画 type=2）
+public struct CalendarDay: Codable, Sendable {
+    public let weekday: Weekday?
+    public let items: [Subject]?
+
+    public struct Weekday: Codable, Sendable {
+        public let id: Int?
+        public let en: String?
+        public let cn: String?
+        public let ja: String?
+    }
+
+    public init(weekday: Weekday?, items: [Subject]?) {
+        self.weekday = weekday
+        self.items = items
+    }
+}
+
 /// 条目（GET /v0/subjects/{id}）
 public struct Subject: Codable, Sendable, Identifiable {
     public let id: Int

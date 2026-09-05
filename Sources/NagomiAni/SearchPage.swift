@@ -26,6 +26,8 @@ struct SearchPage: View {
 
     private var searchListView: some View {
         VStack(alignment: .leading, spacing: 10) {
+            todaySection
+
             HStack(spacing: 8) {
                 TextField("搜索 Bangumi 条目（动画名 / 原名）", text: $model.keyword)
                     .textFieldStyle(.roundedBorder)
@@ -38,7 +40,7 @@ struct SearchPage: View {
                 .disabled(model.keyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearching)
             }
             .padding(.horizontal, 16)
-            .padding(.top, 12)
+            .padding(.top, 8)
 
             if model.isSearching {
                 ProgressView("搜索中…")
@@ -75,10 +77,90 @@ struct SearchPage: View {
         }
     }
 
+    // MARK: - 今日更新
+
+    /// “今日更新”模块：Bangumi 放送日历里今天在播的动画（横向卡片列表）
+    @ViewBuilder
+    private var todaySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "calendar.badge.clock")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.accentColor)
+                Text("今日更新")
+                    .font(.headline)
+                Text(SearchViewModel.todayTitle())
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if model.isLoadingToday {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if model.todayMessage != nil {
+                    Button("重试") { model.retryToday() }
+                        .controlSize(.small)
+                }
+            }
+            .padding(.horizontal, 16)
+
+            if let message = model.todayMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+            } else if model.todayAnime.isEmpty && !model.isLoadingToday {
+                Text("今天暂时没有条目更新")
+                    .font(.footnote)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 16)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(alignment: .top, spacing: 10) {
+                        ForEach(model.todayAnime) { subject in
+                            todayCard(subject)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 2)
+                }
+                .frame(height: 148)
+            }
+        }
+        .padding(.top, 12)
+    }
+
+    /// 今日更新卡片：封面 + 标题，点击进入条目详情
+    private func todayCard(_ subject: Subject) -> some View {
+        Button {
+            model.open(subject: subject)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                AsyncImage(url: Self.imageURL(subject.images?.common)) { image in
+                    image.resizable().scaledToFit()
+                } placeholder: {
+                    Rectangle()
+                        .fill(Color.gray.opacity(0.15))
+                        .overlay { Image(systemName: "film").foregroundStyle(.secondary) }
+                }
+                .frame(width: 78, height: 106)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                Text(subject.nameCN ?? subject.name ?? "?")
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: 78, alignment: .leading)
+            }
+        }
+        .buttonStyle(.plain)
+        .help(subject.nameCN ?? subject.name ?? "")
+    }
+
     private func resultRow(_ subject: Subject) -> some View {
         HStack(spacing: 12) {
             AsyncImage(url: Self.imageURL(subject.images?.common)) { image in
-                image.resizable().scaledToFill()
+                image.resizable().scaledToFit()
             } placeholder: {
                 Rectangle().fill(Color.gray.opacity(0.15))
                     .overlay { Image(systemName: "film").foregroundStyle(.secondary) }
@@ -141,9 +223,13 @@ struct SearchPage: View {
 struct SubjectDetailView: View {
     @ObservedObject var model: SearchViewModel
     let subject: Subject
+    /// 返回按钮文案（搜索页默认「返回搜索」，Bangumi 收藏页用「返回」）
+    var backLabel: String = "返回搜索"
     @State private var tab: DetailTab = .episodes
     /// 待确认的收藏动作（非 nil 时弹出确认框）
     @State private var pendingAction: CollectionAction?
+    /// 资料表（infobox）是否展开全部条目（信息多时默认折叠前几条）
+    @State private var showAllInfobox = false
 
     enum CollectionAction {
         case set(SubjectCollectionType)
@@ -159,6 +245,22 @@ struct SubjectDetailView: View {
         var id: String { rawValue }
     }
 
+    /// 主标题：优先用已加载的 v0 详情（Bangumi 收藏打开时传入的条目可能只有 id）
+    private var primaryTitle: String {
+        model.detailSubject?.nameCN
+            ?? model.detailSubject?.name
+            ?? subject.nameCN
+            ?? subject.name
+            ?? ""
+    }
+
+    /// 原名（副标题）：与主标题不同才显示
+    private var originalName: String? {
+        let loaded = model.detailSubject?.name ?? subject.name
+        guard let loaded, loaded != primaryTitle else { return nil }
+        return loaded
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // 顶部返回栏
@@ -166,10 +268,10 @@ struct SubjectDetailView: View {
                 Button {
                     model.back()
                 } label: {
-                    Label("返回搜索", systemImage: "chevron.left")
+                    Label(backLabel, systemImage: "chevron.left")
                 }
                 .buttonStyle(.plain)
-                Text(subject.nameCN ?? subject.name ?? "")
+                Text(primaryTitle)
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
@@ -226,10 +328,10 @@ struct SubjectDetailView: View {
             .layoutPriority(1)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text(subject.nameCN ?? subject.name ?? "")
+                Text(primaryTitle)
                     .font(.title2.bold())
                     .foregroundStyle(.primary)
-                if let name = subject.name, name != subject.nameCN {
+                if let name = originalName {
                     Text(name)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -260,41 +362,59 @@ struct SubjectDetailView: View {
                 // 否则 FlowLayout 收到无限宽提案会按单行计算，导致标签区超宽、
                 // 封面被压缩变小、换行后高度算错与下方内容重叠）
                 if let tags = model.detailSubject?.tags, !tags.isEmpty {
-                    FlowLayout(spacing: 6) {
+                    // LazyVGrid（自适应列）替代自定义 FlowLayout：FlowLayout 在提案宽度为
+                    // 无穷大时高度只按一行计算、实际却按窄列换行成多行，导致下方
+                    // 简介/资料表按过短高度绘制而互相重叠。Grid 按真实宽度算行高，天然不重叠。
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 76), spacing: 6)], alignment: .leading, spacing: 6) {
                         ForEach(Array(tags.prefix(12)), id: \.name) { tag in
                             Text(tag.name ?? "")
                                 .font(.caption)
+                                .lineLimit(1)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color.gray.opacity(0.12), in: Capsule())
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 // 资料表（infobox）
-                if let infobox = model.detailSubject?.infobox, !infobox.isEmpty {
-                    VStack(alignment: .leading, spacing: 5) {
-                        ForEach(infobox, id: \.key) { item in
-                            if let key = item.key, !key.isEmpty {
-                                HStack(alignment: .top, spacing: 10) {
-                                    Text(key)
-                                        .font(.callout)
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 72, alignment: .leading)
-                                    Text(infoboxText(item.value))
-                                        .font(.callout)
-                                        .foregroundStyle(.primary)
-                                        // 长值（如一长串别名）在可用宽度内换行，避免撑宽信息列
-                                        .fixedSize(horizontal: false, vertical: true)
-                                    Spacer(minLength: 0)
+                if let infobox = model.detailSubject?.infobox {
+                    let rows = infobox.filter { !($0.key ?? "").isEmpty }
+                    if !rows.isEmpty {
+                        // 信息多时折叠：默认只显示前几条，超出给「展开全部」，避免把下方角色/制作推得很远
+                        let visible = showAllInfobox ? rows : Array(rows.prefix(4))
+                        VStack(alignment: .leading, spacing: 5) {
+                            ForEach(visible, id: \.key) { item in
+                                if let key = item.key, !key.isEmpty {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Text(key)
+                                            .font(.callout)
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 72, alignment: .leading)
+                                        Text(infoboxText(item.value))
+                                            .font(.callout)
+                                            .foregroundStyle(.primary)
+                                            // 长值（如一长串别名）在可用宽度内换行，避免撑宽信息列
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        Spacer(minLength: 0)
+                                    }
                                 }
                             }
                         }
+                        .padding(10)
+                        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(alignment: .bottomTrailing) {
+                            if !showAllInfobox && rows.count > 4 {
+                                expandInfoButton("展开全部 (\(rows.count))")
+                            }
+                        }
+                        if showAllInfobox && rows.count > 4 {
+                            expandInfoButton("收起")
+                                .padding(.top, 3)
+                        }
                     }
-                    .padding(10)
-                    .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
                 }
             }
             // 右侧详情：占满封面之外的剩余空间（不设固定 maxWidth，
@@ -302,6 +422,19 @@ struct SubjectDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 0)
         }
+    }
+
+    /// 「展开全部 / 收起」资料表的按钮
+    private func expandInfoButton(_ title: String) -> some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) { showAllInfobox.toggle() }
+        } label: {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+        }
+        .buttonStyle(.plain)
+        .help(title)
     }
 
     private func ratingRow(score: Double?, rank: Int?, total: Int?) -> some View {
@@ -348,7 +481,8 @@ struct SubjectDetailView: View {
                 Text("收藏状态")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                FlowLayout(spacing: 8) {
+                // LazyVGrid 替代 FlowLayout：避免无穷宽提案导致高度算错、与下方重叠
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 8)], alignment: .leading, spacing: 8) {
                     ForEach(SubjectCollectionType.allCases.filter { $0 != .unknown }, id: \.self) { type in
                         Button {
                             pendingAction = .set(type)
@@ -357,6 +491,7 @@ struct SubjectDetailView: View {
                                 .font(.title3)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 7)
+                                .frame(maxWidth: .infinity, alignment: .center)
                                 .background(
                                     model.collectionType(for: subject.id) == type
                                         ? SearchViewModel.collectionColor(type).opacity(0.25)
@@ -379,6 +514,7 @@ struct SubjectDetailView: View {
                             .font(.title3)
                             .padding(.horizontal, 15)
                             .padding(.vertical, 7)
+                            .frame(maxWidth: .infinity, alignment: .center)
                             .background(Color.red.opacity(0.12), in: Capsule())
                             .foregroundStyle(.red)
                     }
@@ -386,7 +522,6 @@ struct SubjectDetailView: View {
                     .help("移除收藏")
                     .disabled(model.collectionType(for: subject.id) == nil)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
                 if let message = model.collectionMessage {
                     Text(message)
                         .font(.caption2)
@@ -779,8 +914,10 @@ struct FlowLayout: Layout {
 
 // MARK: - 封面图片（NSImageView 确定性渲染）
 
-/// 用 NSImageView 直接渲染远程封面：
-/// 避开 SwiftUI AsyncImage 的布局不确定行为，frame 给多大就显示多大。
+/// 用 NSImageView 直接渲染远程封面：完整显示整张图（等比缩放，不裁切中间）。
+/// 注意：不要用 `imageScaling = .scaleProportionallyUpOrDown` + `wantsLayer` 的组合——
+/// 在 layer-backed 的 NSImageView 上它可能按图片原始尺寸居中绘制、再被 masksToBounds 裁掉四周，
+/// 于是只看到中间。改用 layer.contents + contentsGravity = .resizeAspect 可靠地"整图等比放缩进框"。
 struct CoverImageView: NSViewRepresentable {
     let url: URL?
     /// 简单内存缓存（同一次运行内避免重复下载）
@@ -788,31 +925,41 @@ struct CoverImageView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSImageView {
         let view = NSImageView()
-        view.imageScaling = .scaleProportionallyUpOrDown
-        view.imageAlignment = .alignCenter
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.15).cgColor
         view.layer?.cornerRadius = 8
         view.layer?.masksToBounds = true
+        view.layer?.contentsGravity = .resizeAspect
         return view
     }
 
     func updateNSView(_ view: NSImageView, context: Context) {
         guard let url else {
-            view.image = nil
+            view.layer?.contents = nil
             return
         }
         if let cached = Self.cache[url.absoluteString] {
-            view.image = cached
+            apply(image: cached, to: view)
             return
         }
         Task.detached(priority: .userInitiated) {
             if let image = NSImage(contentsOf: url) {
                 await MainActor.run {
                     Self.cache[url.absoluteString] = image
-                    view.image = image
+                    apply(image: image, to: view)
                 }
             }
         }
+    }
+
+    /// 把图片以"整图等比缩放"画进 layer（.resizeAspect = contain，居中，不裁切）
+    private func apply(image: NSImage, to view: NSImageView) {
+        view.image = nil
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            view.layer?.contents = nil
+            return
+        }
+        view.layer?.contents = cg
+        view.layer?.contentsGravity = .resizeAspect
     }
 }

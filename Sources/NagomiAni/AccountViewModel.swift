@@ -9,8 +9,6 @@ final class AccountViewModel: ObservableObject {
     @Published var collections: [UserSubjectCollection] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
-    @Published var clientID: String
-    @Published var clientSecret: String
     /// 正在同步的条目 ID（预留）
     @Published var collectionType: SubjectCollectionType = .doing {
         didSet {
@@ -19,14 +17,11 @@ final class AccountViewModel: ObservableObject {
         }
     }
 
-    private let defaults = UserDefaults.standard
     private let client = BangumiClient()
     private var auth: BangumiAuth?
     private var sync: HistorySyncService?
 
     init() {
-        clientID = defaults.string(forKey: "bangumi.clientID") ?? ""
-        clientSecret = defaults.string(forKey: "bangumi.clientSecret") ?? ""
         setupAuth()
         if auth?.isLoggedIn == true {
             Task { await refresh() }
@@ -36,15 +31,8 @@ final class AccountViewModel: ObservableObject {
     // MARK: - 动作
 
     func login() async {
-        guard !clientID.trimmingCharacters(in: .whitespaces).isEmpty,
-              !clientSecret.isEmpty else {
-            errorMessage = "请先填写 App ID 和 App Secret（在 bgm.tv/dev/app 注册应用获取）"
-            return
-        }
-        defaults.set(clientID, forKey: "bangumi.clientID")
-        defaults.set(clientSecret, forKey: "bangumi.clientSecret")
-        setupAuth()
-
+        // 凭证已内置在应用里（BangumiCredentials）——开发者注册一次、所有用户共用，
+        // 用户只需在浏览器里用自己的账号授权，无需填写 App ID/Secret
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
@@ -65,6 +53,11 @@ final class AccountViewModel: ObservableObject {
         user = nil
         collections = []
         isLoggedIn = false
+    }
+
+    /// 用户在浏览器授权页放弃/关页后点「取消登录」：让等待中的登录流程立刻返回
+    func cancelLogin() {
+        auth?.cancelLogin()
     }
 
     func refresh() async {
@@ -131,8 +124,7 @@ final class AccountViewModel: ObservableObject {
     }
 
     private func setupAuth() {
-        let config = BangumiAppConfig(clientID: clientID, clientSecret: clientSecret)
-        let newAuth = BangumiAuth(config: config)
+        let newAuth = BangumiAuth(config: BangumiCredentials.config)
         auth = newAuth
         client.accessToken = newAuth.accessToken
         sync = HistorySyncService(client: client)

@@ -31,6 +31,8 @@ final class LibraryViewModel: ObservableObject {
     }
     /// 等待确认移除的番（非 nil 时弹出确认）
     @Published var seriesToRemove: Series?
+    /// 更新后本地文件全部消失、需要用户选择"移动位置 / 已删除"的番（非 nil 时弹窗）
+    @Published var vanishedSeries: Series?
 
     private let library: MediaLibrary
 
@@ -91,15 +93,70 @@ final class LibraryViewModel: ObservableObject {
         guard !isScanning else { return }
         isScanning = true
         statusMessage = nil
-        let folder = series.seriesKey
+        let key = series.seriesKey
         let library = self.library
         Task.detached(priority: .userInitiated) {
-            library.rescanFolder(folder)
+            library.rescanFolder(key)
             await MainActor.run {
                 self.isScanning = false
                 self.reload()
+                // 更新后这部番一个本地文件都不剩（已关联的被保留为空条目）
+                // → 让用户决定：文件是移动了还是删除了
+                if let now = self.library.series.first(where: { $0.seriesKey == key }),
+                   now.files.isEmpty, now.subjectID != nil {
+                    self.vanishedSeries = now
+                }
             }
         }
+    }
+
+    // MARK: - 本地文件全部消失后的二选一
+
+    func dismissVanished() {
+        vanishedSeries = nil
+    }
+
+    /// 用户选「我移动了文件位置」：选新目录并把 Bangumi 关联迁过去
+    func relocateVanishedSeries() {
+        guard let series = vanishedSeries else { return }
+        // alert 按钮回调时弹窗仍在收尾：延后到下一 runloop 再开目录面板，避免模态嵌套
+        let displayName = series.displayName
+        let oldKey = series.seriesKey
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.allowsMultipleSelection = false
+            panel.message = "选择「\(displayName)」移动后的目录（包含该番视频的文件夹）"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+
+            self.isScanning = true
+            let library = self.library
+            Task.detached(priority: .userInitiated) {
+                let newKey = library.relocateSeries(oldSeriesKey: oldKey, to: url.path)
+                await MainActor.run {
+                    self.isScanning = false
+                    self.vanishedSeries = nil
+                    self.reload()
+                    if newKey != nil {
+                        self.statusMessage = "已在新位置恢复「\(displayName)」，Bangumi 关联已保留"
+                    } else {
+                        self.statusMessage = "所选目录里没有找到该番的视频（或同时有多部番），请选择该番自己的文件夹后重试"
+                    }
+                }
+            }
+        }
+    }
+
+    /// 用户选「文件已删除」：直接从番库移除该条目
+    func confirmDeleteVanishedSeries() {
+        guard let series = vanishedSeries else { return }
+        let name = series.displayName
+        library.removeSeries(series.seriesKey)
+        vanishedSeries = nil
+        reload()
+        statusMessage = "已从番库移除「\(name)」"
     }
 
     // MARK: - 扫描与自动匹配

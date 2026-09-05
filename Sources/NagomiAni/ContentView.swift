@@ -90,6 +90,15 @@ struct ContentView: View {
         switch selection {
         case .library:
             LibraryPage(model: library) { url in
+                // 防御：索引残留了磁盘上已不存在的文件（正常应在"更新"重扫时清掉）——
+                // 不再切播放页尝试播放，而是触发该目录重扫并把失效条目清掉
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    if let series = library.series.first(where: { $0.files.contains { $0.path == url.path } }) {
+                        library.rescanFolder(of: series)
+                        library.statusMessage = "本地文件已删除：\(url.lastPathComponent)，已重扫该目录并移除失效条目"
+                    }
+                    return
+                }
                 // 从番库点播：切到播放器页并加载文件；
                 // 目录已在番库中关联 → 直接复用绑定，顶部不再提示"关联条目"
                 selection = .player

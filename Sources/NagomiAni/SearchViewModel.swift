@@ -24,7 +24,15 @@ final class SearchViewModel: ObservableObject {
     @Published var collections: [Int: SubjectCollectionType] = [:]
     @Published var collectionMessage: String?
 
+    // MARK: 今日更新（Bangumi 放送日历）
+    /// 今天（本地星期）在播的动画
+    @Published var todayAnime: [Subject] = []
+    @Published var isLoadingToday = false
+    @Published var todayMessage: String?
+
     private var client: BangumiClient?
+    /// 已拉取过的日历日期（yyyy-MM-dd）：同一天内不重复请求
+    private var todayLoadedKey: String?
 
     init() {
         Task { await prepareClient() }
@@ -35,7 +43,61 @@ final class SearchViewModel: ObservableObject {
         Task {
             await prepareClient()
             await loadMyCollections()
+            await loadToday()
         }
+    }
+
+    /// 只刷新登录状态与我的收藏（供 Bangumi 模块等独立详情入口同步收藏状态显示）
+    func refreshCollections() async {
+        await prepareClient()
+        await loadMyCollections()
+    }
+
+    // MARK: - 今日更新
+
+    /// 拉取本周放送日历并取今天在播的动画；同一天只请求一次
+    func loadToday(force: Bool = false) async {
+        let key = Self.currentDateKey()
+        guard force || todayLoadedKey != key || todayAnime.isEmpty else { return }
+        guard !isLoadingToday else { return }
+        if client == nil { await prepareClient() }
+        isLoadingToday = true
+        todayMessage = nil
+        defer { isLoadingToday = false }
+        do {
+            let api = client ?? BangumiClient()
+            let days = try await api.calendar()
+            let target = Self.todayWeekdayID()
+            let items = days.first { ($0.weekday?.id ?? -1) == target }?.items ?? []
+            todayAnime = items.filter { $0.type == .anime || $0.type == nil }
+            todayLoadedKey = key
+        } catch {
+            todayMessage = "今日更新加载失败：\(Self.describe(error))"
+        }
+    }
+
+    func retryToday() {
+        Task { await loadToday(force: true) }
+    }
+
+    /// Bangumi 日历的 weekday.id：1=周一 … 7=周日
+    static func todayWeekdayID() -> Int {
+        let weekday = Calendar.current.component(.weekday, from: Date()) // 1=周日 … 7=周六
+        return weekday == 1 ? 7 : weekday - 1
+    }
+
+    static func currentDateKey() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }
+
+    /// 今日更新模块标题里的日期，如 “9月5日 周六”
+    static func todayTitle() -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "M月d日 EEEE"
+        return f.string(from: Date())
     }
 
     private func prepareClient() async {

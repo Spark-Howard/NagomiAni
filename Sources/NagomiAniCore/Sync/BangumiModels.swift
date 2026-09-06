@@ -140,12 +140,51 @@ public struct Subject: Codable, Sendable, Identifiable {
     /// 收藏统计（v0 详情接口：想看/看过/在看/搁置/抛弃）
     public let collection: CollectionCounts?
 
+    /// 图片地址集（common/large/medium/small/grid 均为完整 URL）
+    /// 注意：Bangumi 各 API 返回的图片 URL 是明文 http://lain.bgm.tv/…，
+    /// 打包版 .app 受 ATS 约束会拦掉 http（swift run 裸二进制不受 ATS 约束），
+    /// 因此解码时统一把 bgm.tv 系图片主机升级为 https（CDN 支持 https 且更稳）。
     public struct SubjectImages: Codable, Sendable {
         public let large: String?
         public let common: String?
         public let medium: String?
         public let small: String?
         public let grid: String?
+
+        enum CodingKeys: String, CodingKey {
+            case large, common, medium, small, grid
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            large = Self.httpsUpgraded((try? c.decodeIfPresent(String.self, forKey: .large)) ?? nil)
+            common = Self.httpsUpgraded((try? c.decodeIfPresent(String.self, forKey: .common)) ?? nil)
+            medium = Self.httpsUpgraded((try? c.decodeIfPresent(String.self, forKey: .medium)) ?? nil)
+            small = Self.httpsUpgraded((try? c.decodeIfPresent(String.self, forKey: .small)) ?? nil)
+            grid = Self.httpsUpgraded((try? c.decodeIfPresent(String.self, forKey: .grid)) ?? nil)
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encodeIfPresent(large, forKey: .large)
+            try c.encodeIfPresent(common, forKey: .common)
+            try c.encodeIfPresent(medium, forKey: .medium)
+            try c.encodeIfPresent(small, forKey: .small)
+            try c.encodeIfPresent(grid, forKey: .grid)
+        }
+
+        /// 仅把 bgm.tv 系图片主机的 http 升为 https；其它主机/已是 https 的原样保留
+        private static func httpsUpgraded(_ raw: String?) -> String? {
+            guard let raw,
+                  raw.hasPrefix("http://"),
+                  let url = URL(string: raw),
+                  let host = url.host?.lowercased(),
+                  host == "lain.bgm.tv" || host.hasSuffix(".bgm.tv")
+            else { return raw }
+            var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            comps?.scheme = "https"
+            return comps?.url?.absoluteString ?? raw
+        }
     }
 
     public struct SubjectRating: Codable, Sendable {

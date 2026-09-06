@@ -48,13 +48,31 @@ cat > "$STAGE/${APP_NAME}.app/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.video</string>
-    <!-- Bangumi 封面 CDN (lain.bgm.tv) 返回的是明文 http；App 内嵌授权/网页也可能访问
-         http://127.0.0.1 —— 不放开 ATS 会导致“swift run 正常、打包版图片全不显示” -->
+    <!-- ATS：打包版 .app 受 ATS 约束，而 swift run 的裸二进制无 bundle 不受 ATS 约束——
+         这正是“swift run 封面正常、打包版封面全不显示”的根本差异。
+         Bangumi 封面 CDN（lain.bgm.tv）在 API JSON 里返回的是明文 http 地址。
+         ⚠ 陷阱：NSAllowsArbitraryLoads 一旦与 NSAllowsArbitraryLoadsInWebContent /
+         NSAllowsLocalNetworking 同时出现，前者会被系统【静默忽略】（macOS 10.12+ 文档行为）。
+         之前“三个全开”导致任意加载被禁用，http 封面在打包版里仍然全被 ATS 拦掉。
+         正确做法：不放全局任意加载，只对 bgm.tv 系图片主机开 http 例外；
+         WebContent 例外仅放行内嵌聊天网页（https://bgm.tv 页面内的 http 子资源）。 -->
     <key>NSAppTransportSecurity</key>
     <dict>
-        <key>NSAllowsArbitraryLoads</key><true/>
         <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
         <key>NSAllowsLocalNetworking</key><true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>lain.bgm.tv</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key><true/>
+                <key>NSIncludesSubdomains</key><true/>
+            </dict>
+            <key>bgm.tv</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key><true/>
+                <key>NSIncludesSubdomains</key><true/>
+            </dict>
+        </dict>
     </dict>
 </dict>
 </plist>

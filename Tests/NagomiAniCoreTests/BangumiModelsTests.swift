@@ -71,6 +71,25 @@ final class BangumiModelsTests: XCTestCase {
         XCTAssertEqual(legacy.rating?.count?["10"], 3059)
     }
 
+    /// 图片 URL：bgm.tv 系主机的明文 http 应升为 https（打包版 App 受 ATS 约束，
+    /// 若不解码时升级，http 封面在打包版里会全部加载失败）；其它主机原样保留
+    func testImageURLsUpgradedToHTTPS() throws {
+        let json = """
+        {"id": 456080,
+         "images": {
+            "large": "http://lain.bgm.tv/pic/cover/l/ce/e2/456080_C4q4C.jpg",
+            "common": "https://lain.bgm.tv/pic/cover/c/ce/e2/456080_C4q4C.jpg",
+            "medium": "http://other.example.com/m.jpg"
+         }}
+        """.data(using: .utf8)!
+        let subject = try JSONDecoder().decode(Subject.self, from: json)
+        XCTAssertEqual(subject.images?.large, "https://lain.bgm.tv/pic/cover/l/ce/e2/456080_C4q4C.jpg")
+        XCTAssertEqual(subject.images?.common, "https://lain.bgm.tv/pic/cover/c/ce/e2/456080_C4q4C.jpg", "已是 https 的不应改动")
+        XCTAssertEqual(subject.images?.medium, "http://other.example.com/m.jpg", "非 bgm.tv 主机不升级")
+        XCTAssertNil(subject.images?.small)
+        XCTAssertNil(subject.images?.grid)
+    }
+
     /// v0 详情接口的 infobox（value 可能是字符串 / 数组 / {v} 对象数组）
     func testSubjectInfoboxDecoding() throws {
         let json = """

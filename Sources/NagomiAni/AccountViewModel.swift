@@ -42,6 +42,8 @@ final class AccountViewModel: ObservableObject {
             try await auth.login()
             client.accessToken = auth.accessToken
             await refresh()
+        } catch BangumiError.loginCancelled {
+            // 用户主动取消：静默退出，不当作错误展示
         } catch {
             errorMessage = Self.describe(error)
         }
@@ -59,6 +61,8 @@ final class AccountViewModel: ObservableObject {
             try await auth.login(openURL: loadURL)
             client.accessToken = auth.accessToken
             await refresh()
+        } catch BangumiError.loginCancelled {
+            // 用户主动取消：静默退出，不当作错误展示
         } catch {
             errorMessage = Self.describe(error)
         }

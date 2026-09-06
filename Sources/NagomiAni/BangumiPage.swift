@@ -1,5 +1,4 @@
 import SwiftUI
-import WebKit
 import NagomiAniCore
 
 /// Bangumi 收藏页（侧边栏第二页）
@@ -7,14 +6,15 @@ import NagomiAniCore
 /// 点击任意收藏条目（在看/想看/看过/搁置/抛弃）→ 跳转该番剧详情页；
 /// 详情页点「返回」→ 回到刚才的 Bangumi 收藏列表。
 /// 详情使用独立的 SearchViewModel（不干扰搜索页自身的选中状态）。
+///
+/// 登录统一在「聊天」页的常驻网页里完成（点击「去聊天页登录」→ 切到聊天 →
+/// 右侧网页登录并点「授权」→ 自动回到本页并同步收藏），本页不再弹独立授权窗。
 struct BangumiPage: View {
     @ObservedObject var model: AccountViewModel
+    /// 统一登录入口（由 ContentView 提供：切到聊天页驱动登录，完成后自动回到本页）
+    let onStartLogin: () -> Void
     /// 本模块详情页专用模型（隔离于搜索页的选中/详情状态）
     @StateObject private var detail = SearchViewModel()
-    /// 内嵌授权面板是否显示
-    @State private var showLoginPanel = false
-    /// 授权页地址（加载进面板的内嵌网页）
-    @State private var loginPanelURL: URL?
 
     var body: some View {
         Group {
@@ -26,11 +26,6 @@ struct BangumiPage: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Bangumi")
-        .overlay {
-            if showLoginPanel {
-                loginPanel
-            }
-        }
         .onAppear {
             // 详情里显示收藏状态徽章：登录状态下同步一次我的收藏
             Task { await detail.refreshCollections() }
@@ -38,48 +33,6 @@ struct BangumiPage: View {
     }
 
     // MARK: - 登录面板（App 内嵌授权，与“聊天”共享网页 Cookie）
-
-    private func startLogin() {
-        guard !showLoginPanel, !model.isLoading else { return }
-        showLoginPanel = true
-        Task {
-            await model.loginInEmbeddedWebview { url in
-                loginPanelURL = url
-            }
-            showLoginPanel = false
-            loginPanelURL = nil
-        }
-    }
-
-    private var loginPanel: some View {
-        ZStack {
-            Color.black.opacity(0.28)
-            VStack(spacing: 14) {
-                HStack {
-                    Text("登录 Bangumi")
-                        .font(.headline)
-                    Spacer()
-                    Button("取消") { model.cancelLogin() }
-                }
-                Text("在下方授权页用你的 Bangumi 账号登录并点「授权」。完成后「聊天」网页将使用同一登录会话，无需再输入账号密码。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                AuthWebPanel(url: loginPanelURL)
-                    .frame(width: 780, height: 560)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                if model.isLoading {
-                    ProgressView("等待授权结果…")
-                        .controlSize(.small)
-                }
-            }
-            .padding(20)
-            .frame(width: 840)
-            .background(Color(nsColor: .windowBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-    }
 
     // MARK: - 收藏列表
 
@@ -112,14 +65,14 @@ struct BangumiPage: View {
             Text("登录 Bangumi 后即可同步收藏")
                 .font(.title3)
 
-            Text("点击登录会在应用内打开授权页，用你的 Bangumi 账号登录并点「授权」；之后「聊天」网页将复用同一会话，无需再输入账号密码。")
+            Text("登录已统一到「聊天」页的 Bangumi 网页里：点下方按钮会切到聊天页，在右侧网页登录你的账号并点一次「授权」；完成后会自动回到这里并同步收藏，聊天网页也无需再单独登录。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
             Button {
-                startLogin()
+                onStartLogin()
             } label: {
-                Text("登录 Bangumi")
+                Text("去「聊天」页登录")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -275,25 +228,5 @@ extension SubjectCollectionType {
         case .dropped: return "抛弃"
         case .unknown: return "其他"
         }
-    }
-}
-
-/// App 内嵌的 Bangumi OAuth 授权面板：
-/// 与“聊天”使用同一个持久化 Cookie 存储（WKWebsiteDataStore.default），
-/// 授权时登录 bgm.tv 会种下网页会话 Cookie → 聊天网页自动处于登录态。
-private struct AuthWebPanel: NSViewRepresentable {
-    let url: URL?
-
-    func makeNSView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
-        let view = WKWebView(frame: .zero, configuration: config)
-        view.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
-        return view
-    }
-
-    func updateNSView(_ nsView: WKWebView, context: Context) {
-        guard let url, nsView.url != url else { return }
-        nsView.load(URLRequest(url: url))
     }
 }

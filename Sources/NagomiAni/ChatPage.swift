@@ -10,6 +10,9 @@ import NagomiAniCore
 /// 避免内嵌网页取代 App 的搜索/收藏等原生功能。
 /// 使用持久化 Cookie（WKWebsiteDataStore.default），用户在该网页内用 Bangumi 账号
 /// 登录一次后，重启仍保持登录。
+///
+/// 默认落地页按登录状态选择：有 bgm 网页会话（chii_sid/chii_auth Cookie）→ 私信
+/// 收件箱；没有 → bgm 登录页（未登录时直接开 /pm 只会看到"请先登录"的报错页）。
 final class WebChatController: NSObject, ObservableObject {
     @Published var canGoBack = false
     @Published var canGoForward = false
@@ -31,7 +34,20 @@ final class WebChatController: NSObject, ObservableObject {
     /// 解析结果回调：数组元素为 {u:用户名, label:昵称, avatar:头像URL}
     var onFriendsParsed: (([[String: String]]) -> Void)?
 
+    /// 网页（站点）登录刚成功的回调：由页面层接上“自动续接 OAuth 授权”链路
+    var onWebLoginDetected: (() -> Void)?
+
+    /// 登录页刚加载完、若发现网页会话已登录就自动跳回收件箱
+    private var inboxAfterLoginCheck = false
+
+    /// OAuth 登录/授权流程进行中：期间放宽白名单——bgm.tv 域内任意主框架页面都留在
+    /// 网页内（授权页/登录页可能跳多步，避免某一步不在名单里被甩去系统浏览器）；
+    /// 流程结束（成功/取消/超时）恢复严格名单
+    var isOAuthLoginActive = false
+
     static let inboxURL = URL(string: "https://bgm.tv/pm")!
+    /// bgm 站点登录页（未登录时的默认落地页）
+    static let loginURL = URL(string: "https://bgm.tv/login")!
 
     init(initialURL: URL = WebChatController.inboxURL) {
         let config = WKWebViewConfiguration()
@@ -51,12 +67,104 @@ final class WebChatController: NSObject, ObservableObject {
         // 用 Safari UA，避免 bgm 把内嵌网页当机器人
         webView.customUserAgent = Self.safariUserAgent
         friendScraper.customUserAgent = Self.safariUserAgent
-        webView.load(URLRequest(url: initialURL))
+        loadDefaultPage(fallback: initialURL)
+    }
+
+    /// 选择默认落地页：先查一次持久化 Cookie——
+    /// 已登录（有 bgm 会话）→ 收件箱；未登录 → 登录页。
+    /// 只有调用方显式给了非默认 URL 时才直接用它。
+    private func loadDefaultPage(fallback: URL) {
+        Task { @MainActor in
+            let loggedIn = await Self.hasBGMWebSession(in: webView.configuration.websiteDataStore)
+            let target: URL
+            if fallback == Self.inboxURL {
+                target = loggedIn ? Self.inboxURL : Self.loginURL
+                inboxAfterLoginCheck = !loggedIn // 未登录：登录成功后就跳回收件箱
+            } else {
+                target = fallback
+            }
+            webView.load(URLRequest(url: target))
+        }
+    }
+
+    /// bgm.tv 是否已有网页登录会话（登录 Cookie：chii_sid + chii_auth）
+    private static func hasBGMWebSession(in store: WKWebsiteDataStore) async -> Bool {
+        let cookies = await store.httpCookieStore.allCookies()
+        var names = Set<String>()
+        for cookie in cookies {
+            let domain = cookie.domain.lowercased()
+            if domain == "bgm.tv" || domain.hasSuffix(".bgm.tv") {
+                names.insert(cookie.name)
+            }
+        }
+        return names.contains("chii_sid") && names.contains("chii_auth")
+    }
+
+    /// 网页登录成功后的统一收尾（不渲染回跳页）：续接授权页；没有授权链路则回收件箱
+    private func handleWebLoginEstablished() {
+        guard inboxAfterLoginCheck else { return }
+        inboxAfterLoginCheck = false
+        if let chain = onWebLoginDetected {
+            chain()
+        } else {
+            webView.load(URLRequest(url: Self.inboxURL))
+        }
+    }
+
+    /// 在登录页停留时监听（兜底）：若上面的“跳转拦截”没生效（例如 Cookie 落盘稍慢），
+    /// 等回跳页加载完成后仍会切到授权页/收件箱
+    private func openInboxAfterWebLoginIfNeeded() {
+        guard inboxAfterLoginCheck else { return }
+        Task { @MainActor in
+            // 稍等 cookie 落盘
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            // 等待期间可能已主动发起 OAuth（loadAuthorize 会把该标志清掉）→ 放弃被动续接
+            guard inboxAfterLoginCheck else { return }
+            let loggedIn = await Self.hasBGMWebSession(in: webView.configuration.websiteDataStore)
+            guard loggedIn else { return } // 还没登录，等下一次加载完成再查
+            handleWebLoginEstablished()
+        }
     }
 
     /// 回到私信收件箱
     func showInbox() {
         load("https://bgm.tv/pm")
+    }
+
+    /// 当前网页是否已登录 bgm（存在 chii_sid + chii_auth Cookie）
+    func isWebLoggedIn() async -> Bool {
+        await Self.hasBGMWebSession(in: webView.configuration.websiteDataStore)
+    }
+
+    /// 打开 bgm 登录页，并开启“登录成功后自动续接”监听（登录完 → 授权页 → 收件箱）
+    func showLoginPage() {
+        inboxAfterLoginCheck = true
+        webView.load(URLRequest(url: Self.loginURL))
+    }
+
+    /// 在同一个（与收藏页共用的）网页里打开 Bangumi OAuth 授权页：
+    /// 用户在此登录 bgm.tv 并点「授权」，登录 Cookie 与聊天会话互通，授权码经
+    /// 本地回环回调由 App 收下换 token（收藏/同步模块随后自动变为已登录）。
+    /// ⚠ 调用前提：网页会话必须已登录——否则 bgm 会把请求 302 到登录页并丢掉
+    /// redirect_uri，登录回来再授权就报 invalid_uri。所以请先 isWebLoggedIn() 判断。
+    func loadAuthorize(_ url: URL) {
+        // 主动走 OAuth 授权：关掉“网页登录后自动续接”的被动检测，避免两条流程打架
+        inboxAfterLoginCheck = false
+        webView.load(URLRequest(url: url))
+    }
+
+    /// 启动 OAuth 授权（account 负责收 code/换 token/刷新；本网页只负责展示授权页）。
+    /// 用于网页已登录的场合：直接出授权确认页，不会触发 bgm 的登录跳转丢参问题。
+    func startOAuth(account: AccountViewModel) {
+        isOAuthLoginActive = true
+        Task { @MainActor in
+            await account.loginInEmbeddedWebview { [weak self] url in
+                self?.loadAuthorize(url)
+            }
+            // 流程结束（成功/取消/超时）→ 恢复严格白名单并回收件箱
+            isOAuthLoginActive = false
+            showInbox()
+        }
     }
 
     /// 打开自己的好友列表页
@@ -368,6 +476,8 @@ extension WebChatController: WKNavigationDelegate {
         isLoading = false
         pageTitle = webView.title ?? "Bangumi 聊天"
         syncNavState()
+        // 若刚从登录页完成网页登录 → 自动进私信收件箱
+        openInboxAfterWebLoginIfNeeded()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -404,20 +514,71 @@ extension WebChatController: WKNavigationDelegate {
             return
         }
 
+        // 登录/授权流程中（OAuth 进行中，或停在登录页等网页登录完成）：
+        // bgm.tv 域内任何主框架页面都留在网页内，避免登录提交/中间跳转
+        // （如 POST /FollowTheRabbit、登录后的回跳等）被白名单拦去系统浏览器
+        let host = url.host?.lowercased() ?? ""
+        let inLoginFlow = isOAuthLoginActive || inboxAfterLoginCheck
+        if inLoginFlow {
+            // 关键：登录成功后 bgm 会 302 回跳主页/其它页——在它渲染前拦截。
+            // 若此刻 Cookie 已就位，直接切授权页，用户看不到一闪而过的主页。
+            if inboxAfterLoginCheck, Self.isLeavingLoginPage(webView: webView, to: url, host: host) {
+                decisionHandler(.cancel)
+                Task { @MainActor in
+                    // 稍等 cookie 落盘，避免服务器已登录但存储尚未更新的竞态
+                    try? await Task.sleep(nanoseconds: 180_000_000)
+                    let loggedIn = await Self.hasBGMWebSession(in: webView.configuration.websiteDataStore)
+                    if loggedIn {
+                        handleWebLoginEstablished() // → 授权页/收件箱，主页不显示
+                    } else {
+                        webView.load(URLRequest(url: url)) // 不是登录成功，放行原跳转
+                    }
+                }
+                return
+            }
+            if host == "bgm.tv" || host.hasSuffix(".bgm.tv")
+                || ((host == "127.0.0.1" || host == "localhost") && url.path == "/callback") {
+                decisionHandler(.allow)
+                return
+            }
+        }
+
         if Self.isChatNavigationAllowed(url, selfUsername: selfUsername) {
             decisionHandler(.allow)
         } else {
             // 聊天以外的页面：不让内嵌网页“逛”走，改由系统浏览器打开
             decisionHandler(.cancel)
+            print("[chat-nav] 转系统浏览器: \(url.absoluteString)")
             DispatchQueue.main.async {
                 NSWorkspace.shared.open(url)
             }
         }
     }
 
+    /// 是否正“从登录页离开”：当前停在登录相关页（/login 或登录提交后），
+    /// 目标却是登录页之外 → 基本就是登录成功后的回跳（主页/原页）。
+    /// 命中后在渲染前拦截，由调用方决定切授权页还是放行。
+    private static func isLeavingLoginPage(webView: WKWebView, to url: URL, host: String) -> Bool {
+        guard host == "bgm.tv" || host.hasSuffix(".bgm.tv") else { return false }
+        let current = webView.url?.path.lowercased() ?? ""
+        let onLoginPage = current.hasPrefix("/login") || current.hasPrefix("/followtherabbit")
+        guard onLoginPage else { return false }
+        let target = url.path.lowercased()
+        return !(target.hasPrefix("/login")
+            || target.hasPrefix("/followtherabbit")
+            || target == "/callback")
+    }
+
     /// 是否允许在聊天 WebView 内停留
     private static func isChatNavigationAllowed(_ url: URL, selfUsername: String?) -> Bool {
-        guard let host = url.host?.lowercased(), host == "bgm.tv" || host.hasSuffix(".bgm.tv") else {
+        guard let host = url.host?.lowercased() else { return false }
+
+        // bgm OAuth 授权回环回调（127.0.0.1:8123/callback）：留在网页内即可，
+        // 授权码由 App 本地监听服务器收下；不弹系统浏览器
+        if (host == "127.0.0.1" || host == "localhost"), url.path == "/callback" {
+            return true
+        }
+        guard host == "bgm.tv" || host.hasSuffix(".bgm.tv") else {
             return false
         }
         let path = url.path.lowercased()
@@ -425,6 +586,7 @@ extension WebChatController: WKNavigationDelegate {
         // 登录/登出/授权过程
         if path == "/" { return true }
         if path.hasPrefix("/login")
+            || path.hasPrefix("/FollowTheRabbit") // bgm 登录表单提交端点
             || path.hasPrefix("/logout")
             || path.hasPrefix("/oauth")
             || path.hasPrefix("/demo/oauth") {
@@ -468,6 +630,7 @@ struct ChatPage: View {
         .onAppear {
             syncWebUser()
             installFriendsParser()
+            installWebLoginChain()
         }
         .onChange(of: account.user?.username) { _ in
             syncWebUser()
@@ -486,11 +649,59 @@ struct ChatPage: View {
         }
     }
 
+    /// 网页（站点）登录成功后 → 自动续接 OAuth 授权页：用户只需再点一次「授权」，
+    /// API token 与网页会话一次到位，无需回收藏页再点登录
+    private func installWebLoginChain() {
+        let webRef = web
+        let accountRef = account
+        web.onWebLoginDetected = { [weak webRef] in
+            guard let webRef else { return }
+            if accountRef.isLoggedIn || accountRef.isLoading {
+                webRef.showInbox()
+                return
+            }
+            // 网页已登录：直接出授权确认页（不会触发 bgm 登录跳转丢 redirect_uri）
+            webRef.startOAuth(account: accountRef)
+        }
+    }
+
     /// 点「同步好友」：在隐藏网页里抓取解析，主网页不动
     private func syncMyFriends() {
         guard let me = account.user?.username else { return }
         contacts.syncMessage = nil
         web.syncFriends(username: me)
+    }
+
+    /// 统一登录入口（收藏页与聊天页共用）：
+    /// - 网页已登录 → 直接进 OAuth 授权页（点「授权」即完成）；
+    /// - 网页未登录 → 先切到 bgm 登录页，登录成功后自动续接授权页
+    ///   （不在未登录时直接请求授权页——bgm 登录跳转会丢 redirect_uri 报 invalid_uri）
+    private func beginAPILogin() {
+        guard !account.isLoading else { return }
+        let accountRef = account
+        Task { @MainActor in
+            if await web.isWebLoggedIn() {
+                web.startOAuth(account: accountRef)
+            } else {
+                web.showLoginPage()
+            }
+        }
+    }
+
+    /// 登录流程进行中（等待用户完成授权）时显示在网页上方的提示条
+    private var loginBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text("登录 Bangumi：请在上方网页登录你的账号并点「授权」")
+                .font(.caption)
+            Spacer()
+            Button("取消") { account.cancelLogin() }
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.08))
     }
 
     // MARK: - 左：联系人/好友
@@ -708,8 +919,17 @@ struct ChatPage: View {
                 }
                 .disabled(account.user == nil || web.isSyncingFriends)
                 .help(account.user == nil
-                      ? "请先在 Bangumi 页登录，才能同步你的网页好友"
+                      ? "请先点工具栏「登录 Bangumi」完成授权，才能同步你的网页好友"
                       : "后台抓取 bgm 好友并加入左侧列表（网页不切换）")
+
+                if !account.isLoggedIn && !account.isLoading {
+                    Button {
+                        beginAPILogin()
+                    } label: {
+                        Label("登录 Bangumi", systemImage: "person.badge.key")
+                    }
+                    .help("统一登录：在右侧网页登录并授权一次，收藏/同步与聊天共用同一会话")
+                }
 
                 Text(web.pageTitle)
                     .font(.caption)
@@ -725,6 +945,12 @@ struct ChatPage: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
+            // 登录流程进行中：顶部提示条（完成/取消后自动消失）
+            if account.isLoading && !account.isLoggedIn {
+                loginBanner
+                Divider()
+            }
+
             Divider()
             EmbeddedWebView(controller: web)
 
@@ -733,7 +959,7 @@ struct ChatPage: View {
                 Image(systemName: "info.circle")
                 Text("仅聊天相关页面可在内嵌页打开；其他链接会转由系统浏览器打开")
                 Spacer()
-                Text("网页内需登录一次（Cookie 已持久化）")
+                Text("登录/授权一次：收藏同步与聊天网页共用（Cookie 已持久化）")
             }
             .font(.caption2)
             .foregroundStyle(.tertiary)

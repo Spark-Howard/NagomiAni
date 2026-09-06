@@ -221,7 +221,7 @@ final class LibraryViewModel: ObservableObject {
         }
         guard let client = await BangumiSession.makeClient() else {
             bindCandidates = []
-            statusMessage = "未登录 Bangumi，无法匹配（请先在 Bangumi 页登录）"
+            statusMessage = "未登录 Bangumi，无法匹配（请先在「聊天」页登录）"
             return
         }
 

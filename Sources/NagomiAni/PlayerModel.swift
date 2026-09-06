@@ -223,7 +223,7 @@ final class PlayerModel: ObservableObject {
 
     func search(keyword: String) async {
         guard let client = await bangumiClient() else {
-            syncMessage = "未登录 Bangumi，无法搜索（请先在 Bangumi 页登录）"
+            syncMessage = "未登录 Bangumi，无法搜索（请先在「聊天」页登录）"
             return
         }
         isSearching = true

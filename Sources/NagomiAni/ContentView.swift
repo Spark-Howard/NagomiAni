@@ -10,6 +10,8 @@ struct ContentView: View {
     /// 常驻的聊天网页控制器（切板块回来不丢页面/登录态）
     @StateObject private var webChat = WebChatController()
     @State private var selection: SidebarItem? = .player
+    /// 统一登录发起来源：登录完成后自动切回该页（nil = 从聊天页发起，不切走）
+    @State private var loginReturnTarget: SidebarItem?
     /// 全屏时隐藏侧边栏，让视频占满整个屏幕（无 UI 边框）
     @State private var isFullScreen = false
 
@@ -34,6 +36,13 @@ struct ContentView: View {
         }
         .onChange(of: selection) { _ in
             updateWindowTitle()
+        }
+        .onChange(of: account.isLoggedIn) { loggedIn in
+            // 统一登录完成后（无论从收藏页还是聊天页发起）：回到发起页并清空待处理目标
+            guard loggedIn, let target = loginReturnTarget else { return }
+            loginReturnTarget = nil
+            webChat.showInbox()
+            selection = target
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
             // 注意：不用 withAnimation 包裹 —— 全屏过渡期间动画化侧边栏增删会让
@@ -117,13 +126,34 @@ struct ContentView: View {
                 }
             }
         case .bangumi:
-            BangumiPage(model: account)
+            BangumiPage(model: account) {
+                startUnifiedLogin(returnTo: .bangumi)
+            }
         case .chat:
             ChatPage(account: account, web: webChat)
         case .search:
             SearchPage(model: search)
         case .player, nil:
             PlayerView(model: model)
+        }
+    }
+
+    /// 统一登录：切到「聊天」页完成登录+授权（不再弹收藏页的独立授权窗）。
+    /// - 网页已登录 → 直接出 OAuth 授权页（点「授权」即完成）；
+    /// - 网页未登录 → 先切到 bgm 登录页，登录成功后自动续接授权页
+    ///   （未登录时直接请求授权页，bgm 登录跳转会把 redirect_uri 弄丢 → invalid_uri）。
+    /// 完成后（account.isLoggedIn 变 true）由 onChange 自动回到发起页。
+    private func startUnifiedLogin(returnTo: SidebarItem?) {
+        guard !account.isLoading else { return }
+        loginReturnTarget = returnTo
+        selection = .chat
+        let accountRef = account
+        Task { @MainActor in
+            if await webChat.isWebLoggedIn() {
+                webChat.startOAuth(account: accountRef)
+            } else {
+                webChat.showLoginPage()
+            }
         }
     }
 }

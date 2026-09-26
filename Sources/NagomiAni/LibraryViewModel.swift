@@ -35,6 +35,13 @@ final class LibraryViewModel: ObservableObject {
     @Published var vanishedSeries: Series?
 
     private let library: MediaLibrary
+    /// 目录监控（FSEvents）：有监控目录时启用，folders 变化自动重建
+    private var monitor: FSEventsDirectoryMonitor?
+    /// 监控流当前对应的根目录（判断是否需要重建）
+    private var monitoredFolders: [String] = []
+    /// 监控事件换算出的待重扫目标（事件到达时累积，单个后台任务串行消费）
+    private var pendingMonitorTargets: Set<String> = []
+    private var monitorApplyTask: Task<Void, Never>?
 
     init() {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -45,6 +52,10 @@ final class LibraryViewModel: ObservableObject {
         Task { await ensureSubjects() }
         Task { await ensureEpisodes() }
         Task { await runAutoMatch() }
+    }
+
+    deinit {
+        monitor?.stop()
     }
 
     // MARK: - 目录
@@ -341,5 +352,78 @@ final class LibraryViewModel: ObservableObject {
     private func reload() {
         series = library.series
         folders = library.folders
+        startDirectoryMonitoringIfNeeded()
+    }
+
+    // MARK: - 目录监控（FSEvents）
+
+    /// folders 变化时重建监控流；没有目录则不监控
+    private func startDirectoryMonitoringIfNeeded() {
+        let current = library.folders
+        if monitor != nil, monitoredFolders == current { return }
+        monitor?.stop()
+        monitoredFolders = current
+        guard !current.isEmpty else {
+            monitor = nil
+            return
+        }
+        monitor = FSEventsDirectoryMonitor(roots: current) { [weak self] paths in
+            Task { @MainActor [weak self] in
+                self?.handleMonitoredChanges(paths)
+            }
+        }
+        monitor?.start()
+    }
+
+    /// 监控事件 → 最小重扫目标集 → 后台串行重扫。
+    /// 背景路径不弹 vanishedSeries 模态（那是手动重扫的 UI 流程），只更新列表与状态栏。
+    private func handleMonitoredChanges(_ paths: [String]) {
+        let targets = DirectoryChangePlanner.rescanTargets(
+            eventPaths: paths,
+            roots: library.folders,
+            seriesKeys: library.series.map(\.seriesKey)
+        )
+        guard !targets.isEmpty else { return }
+        pendingMonitorTargets.formUnion(targets)
+        guard monitorApplyTask == nil else { return }
+        monitorApplyTask = Task.detached(priority: .utility) { [weak self] in
+            await self?.applyMonitorTargets()
+        }
+    }
+
+    /// 串行消费 pendingMonitorTargets：后台重扫 → 主线程刷新。
+    /// nonisolated：rescanFolder 是磁盘扫描，不能占住主线程（与 rescanFolder(of:) 同理）。
+    nonisolated private func applyMonitorTargets() async {
+        let library = self.library
+        while true {
+            let step: (batch: [String], drained: Bool) = await MainActor.run { [weak self] in
+                guard let self else { return ([], true) }
+                if self.pendingMonitorTargets.isEmpty {
+                    // 与 handleMonitoredChanges 同在主线程：判空和清 task 引用是原子的，
+                    // 不会出现"任务已退出但引用还在、新事件只入队无人消费"的竞态
+                    self.monitorApplyTask = nil
+                    return ([], true)
+                }
+                let batch = Array(self.pendingMonitorTargets)
+                self.pendingMonitorTargets = []
+                return (batch, false)
+            }
+            if step.drained { break }
+            for target in step.batch {
+                library.rescanFolder(target)
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.reload()
+                self.statusMessage = "目录监控：检测到文件变化，番库已自动更新"
+                // 新入库的未匹配番：后台生成候选（只出候选，不自动绑定）
+                let hasNewUnmatched = self.library.series.contains {
+                    $0.matchState == .unmatched && (self.candidates[$0.seriesKey] ?? []).isEmpty
+                }
+                if hasNewUnmatched {
+                    Task { await self.runAutoMatch() }
+                }
+            }
+        }
     }
 }

@@ -39,6 +39,16 @@ struct ContentView: View {
         .onChange(of: selection) { _ in
             updateWindowTitle()
         }
+        .onChange(of: selection) { newValue in
+            // 切离播放器自动暂停：画面不可见时音频在后台裸放体验差（用户偏好）；
+            // 切回时仅恢复"系统暂停"的（用户手动暂停的不自动续播）。
+            // 番库点播路径（selection 置 .player 后才 load）不受影响。
+            if newValue == .player {
+                model.resumeIfAutoPaused()
+            } else {
+                model.pauseForHiddenUI()
+            }
+        }
         .onChange(of: account.isLoggedIn) { loggedIn in
             // 统一登录完成后（无论从收藏页还是聊天页发起）：回到发起页并清空待处理目标
             guard loggedIn, let target = loginReturnTarget else { return }

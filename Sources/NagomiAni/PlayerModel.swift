@@ -32,8 +32,30 @@ final class PlayerModel: ObservableObject {
     private static let bindingsKey = "bangumi.bindings"       // [seriesKey: subjectID]
     private static let boundNamesKey = "bangumi.boundNames"   // [seriesKey: 显示名]
 
+    // 断点续播（按文件路径记录，resume.json 持久化）
+    private let resumeStore = PlaybackResumeStore()
+    /// 内存中待落盘的当前文件位置（时间回调更新，按 5s 节流写盘）
+    private var pendingResume: (path: String, position: Double, duration: Double)?
+    private var lastResumeSaveAt: Date?
+    /// 续播目标：mpv 起播瞬间 time-pos 会先报 ~0，到达目标前不允许落盘，
+    /// 防止起播瞬间的小位置覆盖旧记录（用户手动 seek 即视为放弃该目标）
+    private var pendingResumeTarget: Double?
+    private var terminateObserver: NSObjectProtocol?
+
     init() {
         engine.delegate = self
+        // 退出前把最后位置落盘（播放中强杀进程最多丢 5s，可接受）
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.flushResume(force: true)
+        }
+    }
+
+    deinit {
+        if let terminateObserver {
+            NotificationCenter.default.removeObserver(terminateObserver)
+        }
     }
 
     // MARK: - 动作
@@ -55,6 +77,8 @@ final class PlayerModel: ObservableObject {
         librarySubjectID: Int? = nil,
         librarySubject: Subject? = nil
     ) async {
+        // 换文件前先把上一个文件的位置落盘
+        flushResume(force: true)
         fileName = url.lastPathComponent
         currentMedia = MediaMatching.parse(fileName: url.lastPathComponent)
         hideBindingBar = fromLibrary
@@ -66,8 +90,18 @@ final class PlayerModel: ObservableObject {
         } else {
             restoreBinding()
         }
+        // 断点续播：查上次位置，值得跳转则从该处开始（番库/Cmd+O/拖拽统一生效）
+        let path = url.standardizedFileURL.path
+        let resumeAt = resumeStore.entry(forPath: path)
+            .flatMap { ResumePolicy.resumePosition(position: $0.position, duration: $0.duration) }
+        pendingResume = (path: path, position: resumeAt ?? 0, duration: 0)
+        pendingResumeTarget = resumeAt
+        lastResumeSaveAt = Date()
         do {
-            try await engine.load(url: url, options: PlaybackOptions())
+            try await engine.load(url: url, options: PlaybackOptions(startTime: resumeAt ?? 0))
+            if let resumeAt {
+                syncMessage = "已从 \(Self.format(resumeAt)) 继续播放"
+            }
         } catch {
             // 引擎已通过 delegate 上报 failed 状态
         }
@@ -99,6 +133,8 @@ final class PlayerModel: ObservableObject {
 
     func seek(to seconds: Double) {
         lastSeekTime = Date()
+        // 用户手动跳转即放弃"等引擎到达续播点"的落盘闸门
+        pendingResumeTarget = nil
         engine.seek(to: seconds, completion: nil)
     }
 
@@ -132,6 +168,8 @@ final class PlayerModel: ObservableObject {
     private func markWatched(episode: Int, seriesKey: String, key: String) {
         // 先入集合：同一集本次运行内只触发一次
         markedWatchedKeys.insert(key)
+        // 已按"看完"处理：清除续播记录，下次从头播
+        clearResume()
         Task {
             do {
                 guard let client = await bangumiClient() else {
@@ -150,6 +188,41 @@ final class PlayerModel: ObservableObject {
                 syncMessage = "同步失败：\(Self.describe(error))"
             }
         }
+    }
+
+    // MARK: - 断点续播
+
+    /// 记录最新播放位置（每个时间回调更新内存，落盘节流见 flushResume）
+    private func trackResumePosition(_ time: Double) {
+        guard pendingResume != nil else { return }
+        pendingResume?.position = time
+        pendingResume?.duration = duration
+        if let target = pendingResumeTarget {
+            // 引擎还没到续播点（起播瞬间 time-pos 先报 ~0），此时不落盘
+            guard time >= target - 1 else { return }
+            pendingResumeTarget = nil
+        }
+        flushResume(force: false)
+    }
+
+    /// 写入存储。非强制时距上次落盘不足 5s 跳过；续播目标未到达前一律跳过。
+    private func flushResume(force: Bool) {
+        guard let pending = pendingResume, pending.position > 0 else { return }
+        if let target = pendingResumeTarget, pending.position < target - 1 { return }
+        if !force, let last = lastResumeSaveAt, Date().timeIntervalSince(last) < 5 {
+            return
+        }
+        lastResumeSaveAt = Date()
+        resumeStore.update(path: pending.path, position: pending.position, duration: pending.duration)
+    }
+
+    /// 清除当前文件的续播记录（看完即清，下次从头播）
+    private func clearResume() {
+        if let pending = pendingResume {
+            resumeStore.remove(path: pending.path)
+        }
+        pendingResume = nil
+        pendingResumeTarget = nil
     }
 
     // MARK: - 音轨 / 字幕
@@ -374,6 +447,7 @@ extension PlayerModel: PlaybackEngineDelegate {
             currentTime = time
             sliderValue = time
         }
+        trackResumePosition(time)
         // 自然播放到阈值即标记看过（EOF 由 playbackEngineDidFinish 兜底）
         checkAutoMarkWatched()
     }
@@ -383,10 +457,19 @@ extension PlayerModel: PlaybackEngineDelegate {
         if case .ready = state {
             duration = engine.duration
             syncTracks()
+            pendingResume?.duration = duration
+            // 记录的续播点超出实际时长（文件被替换/记录损坏）→ 放弃闸门，正常记录
+            if let target = pendingResumeTarget, duration > 0, target > duration - 1 {
+                pendingResumeTarget = nil
+            }
         }
+        // 暂停/出错等状态切换频率低，强制落盘一次
+        flushResume(force: true)
     }
 
     func playbackEngineDidFinish(_ engine: PlaybackEngine) {
+        // 播完：清续播记录，下次从头开始
+        clearResume()
         autoSyncOnFinish()
     }
 

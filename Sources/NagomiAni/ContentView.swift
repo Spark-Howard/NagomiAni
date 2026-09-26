@@ -40,12 +40,10 @@ struct ContentView: View {
             updateWindowTitle()
         }
         .onChange(of: selection) { newValue in
-            // 切离播放器自动暂停：画面不可见时音频在后台裸放体验差（用户偏好）；
-            // 切回时仅恢复"系统暂停"的（用户手动暂停的不自动续播）。
-            // 番库点播路径（selection 置 .player 后才 load）不受影响。
-            if newValue == .player {
-                model.resumeIfAutoPaused()
-            } else {
+            // 切离播放器自动暂停：画面不可见时音频在后台裸放体验差（用户偏好）。
+            // 切回保持暂停、不自动续播——开始播放只由明确动作触发（空格/点播放/点集），
+            // 避免"只是回来看一眼却被突然出声"。
+            if newValue != .player {
                 model.pauseForHiddenUI()
             }
         }

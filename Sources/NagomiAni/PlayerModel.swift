@@ -40,8 +40,6 @@ final class PlayerModel: ObservableObject {
     /// 续播目标：mpv 起播瞬间 time-pos 会先报 ~0，到达目标前不允许落盘，
     /// 防止起播瞬间的小位置覆盖旧记录（用户手动 seek 即视为放弃该目标）
     private var pendingResumeTarget: Double?
-    /// 切离播放器页被系统自动暂停的标记（与用户手动暂停区分，切回时据此自动续播）
-    private var autoPausedBySwitch = false
     private var terminateObserver: NSObjectProtocol?
 
     init() {
@@ -121,18 +119,11 @@ final class PlayerModel: ObservableObject {
     }
 
     /// 切离播放器页时调用：正在播放则自动暂停（画面已不可见，音频不应在后台裸放）。
-    /// 暂停会触发 didChangeState(.paused) → 强制落盘续播位置，与断点续播正好衔接。
+    /// 切回时保持暂停，由用户自行开始——不自动续播，避免"回来只是看一眼却被突然出声"。
+    /// 暂停触发 didChangeState(.paused) → 强制落盘续播位置，与断点续播正好衔接。
     func pauseForHiddenUI() {
         guard engine.isPlaying else { return }
-        autoPausedBySwitch = true
         engine.pause()
-    }
-
-    /// 切回播放器页时调用：仅当暂停是"切走"造成的才自动续播（用户手动暂停的不动）
-    func resumeIfAutoPaused() {
-        guard autoPausedBySwitch else { return }
-        autoPausedBySwitch = false
-        engine.play()
     }
 
     // MARK: - 自动同步（看完标记看过）

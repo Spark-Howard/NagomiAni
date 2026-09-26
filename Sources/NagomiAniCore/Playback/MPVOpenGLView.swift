@@ -57,6 +57,12 @@ final class MPVOpenGLView: NSOpenGLView {
         needsDisplay = true
     }
 
+    /// 全屏进出/显示器变化可能改变 backing（Retina 缩放），surface 内容丢失后需要重绘
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsDisplay = true
+    }
+
     /// 页面切换（PlayerView 销毁/重建）导致视图重新挂到窗口时，
     /// 重新绑定 GL 上下文并触发重绘，避免渲染失效
     override func viewDidMoveToWindow() {
@@ -85,10 +91,12 @@ final class MPVOpenGLView: NSOpenGLView {
                     mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: UnsafeMutableRawPointer(flipPtr)),
                     mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil),
                 ]
-                let flags = mpv_render_context_update(renderContext)
-                if flags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue) != 0 {
-                    mpv_render_context_render(renderContext, &params)
-                }
+                // 必须无条件渲染当前帧。曾经按 mpv_render_context_update() 的
+                // UPDATE_FRAME 标志决定是否渲染——但暂停态没有新帧、标志永远不置位，
+                // 于是全屏切换/resize 等 AppKit 触发的重绘只 flush 空缓冲 → 黑屏，
+                // 直到点播放才有新帧恢复。render 对暂停视频会重绘最后一帧（render API 语义），
+                // 播放中则渲染最新帧，两种状态都正确。
+                mpv_render_context_render(renderContext, &params)
             }
         }
         openGLContext?.flushBuffer()

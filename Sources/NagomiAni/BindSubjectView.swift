@@ -37,14 +37,14 @@ struct BindSubjectView: View {
                     } label: {
                         HStack {
                             VStack(alignment: .leading) {
-                                Text(subject.nameCN ?? "—")
+                                Text(subject.displayName.isEmpty ? "—" : subject.displayName)
                                     .font(.body)
                                 Text(subject.name ?? "")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Text("共 \(subject.totalEpisodes ?? 0) 集")
+                            Text("共 \(subject.episodeCount ?? 0) 集")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

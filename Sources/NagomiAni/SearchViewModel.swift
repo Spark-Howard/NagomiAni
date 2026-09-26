@@ -2,14 +2,6 @@ import Foundation
 import SwiftUI
 import NagomiAniCore
 
-/// 搜索页“最近更新”的一天分组（今天在最前，前 6 天依次向后）
-struct WeekUpdateSection: Identifiable {
-    let id: String        // yyyy-MM-dd
-    let title: String     // “今天” 或 “周一 … 周日”
-    let dateText: String  // 如 “9月5日”
-    let items: [Subject]
-}
-
 /// 浏览/搜索页面的状态模型：搜索词条 → 查看 Bangumi 剧目详情
 @MainActor
 final class SearchViewModel: ObservableObject {
@@ -32,15 +24,26 @@ final class SearchViewModel: ObservableObject {
     @Published var collections: [Int: SubjectCollectionType] = [:]
     @Published var collectionMessage: String?
 
+    /// 我的收藏映射的最近拉取时间：避免每次进入页面都整表重拉
+    private var collectionsLoadedAt: Date?
+    /// 收藏映射缓存有效期（搜索/详情页的收藏状态徽章，5 分钟内不重复拉）
+    private let collectionsTTL: TimeInterval = 300
+
     // MARK: 最近更新（过去一周，Bangumi 放送日历）
     /// 最近 7 天每天在播动画（今天在最前，含空档日）
     @Published var weekUpdates: [WeekUpdateSection] = []
     @Published var isLoadingWeek = false
+    /// 后台静默核对中（已有缓存内容时用它显示细进度条，不遮挡列表）
+    @Published var isRefreshingWeekInBackground = false
+    /// 缓存写入时间（用于界面显示"更新于 …"）
+    @Published var weekUpdatedAt: Date?
     @Published var weekMessage: String?
 
     private var client: BangumiClient?
-    /// 已拉取过的日历日期（yyyy-MM-dd）：同一天内不重复请求
-    private var weekLoadedKey: String?
+    /// 放送日历缓存：同一天内秒开、零请求；跨天后第一次进入自动核对
+    private var weekCache: WeekScheduleCache?
+    /// 同类型并发去重：反复进出页面时复用同一次请求
+    private var weekTask: Task<[CalendarDay], Error>?
 
     init() {
         Task { await prepareClient() }
@@ -51,7 +54,7 @@ final class SearchViewModel: ObservableObject {
         Task {
             await prepareClient()
             await loadMyCollections()
-            await loadWeek()
+            showCachedWeekOrLoad()
         }
     }
 
@@ -63,44 +66,83 @@ final class SearchViewModel: ObservableObject {
 
     // MARK: - 最近更新（过去一周）
 
-    /// 拉取放送日历，整理成“今天 → 前 6 天”每天动画列表；同一天只请求一次
-    func loadWeek(force: Bool = false) async {
-        let key = Self.currentDateKey()
-        guard force || weekLoadedKey != key || weekUpdates.isEmpty else { return }
+    /// 载入「最近更新」：有缓存立刻显示，再按需（跨天）后台核对是否有变化。
+    ///
+    /// 缓存只存原始日历，分组标题每次按当前时间重建 —— 所以跨零点后
+    /// 「今天」不会错位。
+    func showCachedWeekOrLoad() {
+        let today = WeekSchedule.dateKey(Date())
+
+        if let cache = weekCache {
+            // 秒开：直接用缓存重建分组（标题按当前日期算）
+            weekUpdates = cache.sections()
+            weekUpdatedAt = cache.updatedAt
+            weekMessage = nil
+
+            // 同一天内不再请求；跨天才静默核对
+            guard cache.needsRefresh(today: today) else { return }
+            Task { await loadWeek(force: true, silent: true) }
+        } else {
+            Task { await loadWeek(force: true) }
+        }
+    }
+
+    /// 拉取放送日历；有未过期缓存且非 force 时直接命中
+    func loadWeek(force: Bool = false, silent: Bool = false) async {
+        let today = WeekSchedule.dateKey(Date())
+
+        if !force, let cache = weekCache, !cache.needsRefresh(today: today) {
+            weekUpdates = cache.sections()
+            weekUpdatedAt = cache.updatedAt
+            return
+        }
         guard !isLoadingWeek else { return }
         if client == nil { await prepareClient() }
-        isLoadingWeek = true
-        weekMessage = nil
-        defer { isLoadingWeek = false }
-        do {
-            let api = client ?? BangumiClient()
-            let days = try await api.calendar()
-            let cal = Calendar.current
-            let weekdayCN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-            let dayFormatter = DateFormatter()
-            dayFormatter.dateFormat = "M月d日"
-            let keyFormatter = DateFormatter()
-            keyFormatter.dateFormat = "yyyy-MM-dd"
 
-            var sections: [WeekUpdateSection] = []
-            // 今天在最上，依次往前 6 天（越新越靠前）
-            for ago in 0...6 {
-                let date = cal.date(byAdding: .day, value: -ago, to: Date()) ?? Date()
-                let weekday = Self.bangumiWeekdayID(for: date)
-                let items = (days.first { $0.weekday?.id == weekday }?.items ?? [])
-                    .filter { $0.type == .anime || $0.type == nil }
-                sections.append(WeekUpdateSection(
-                    id: keyFormatter.string(from: date),
-                    title: ago == 0 ? "今天" : weekdayCN[weekday - 1],
-                    dateText: dayFormatter.string(from: date),
-                    items: items
-                ))
+        if silent {
+            isRefreshingWeekInBackground = true
+        } else {
+            // 已有内容时不打断（避免清空列表造成闪烁）
+            isLoadingWeek = weekUpdates.isEmpty
+        }
+        weekMessage = nil
+        defer {
+            if silent { isRefreshingWeekInBackground = false }
+            if !silent { isLoadingWeek = false }
+        }
+
+        do {
+            let days = try await fetchCalendar()
+            let fresh = WeekScheduleCache(days: days, fetchedOn: today, updatedAt: Date())
+            let newSections = fresh.sections()
+
+            // 内容没变就不动界面，避免无谓重绘
+            if !Self.sameSections(newSections, weekUpdates) {
+                weekUpdates = newSections
             }
-            weekUpdates = sections
-            weekLoadedKey = key
+            weekCache = fresh
+            weekUpdatedAt = fresh.updatedAt
         } catch {
+            // 静默核对失败：保留缓存内容，只在界面提示
             weekMessage = "最近更新加载失败：\(Self.describe(error))"
         }
+    }
+
+    /// 请求放送日历，并发去重
+    private func fetchCalendar() async throws -> [CalendarDay] {
+        if let existing = weekTask {
+            return try await existing.value
+        }
+        let api = client ?? BangumiClient()
+        let task = Task<[CalendarDay], Error> { try await api.calendar() }
+        weekTask = task
+        defer { weekTask = nil }
+        return try await task.value
+    }
+
+    /// 两组分组是否等价（实现在 Core，便于单测）
+    static func sameSections(_ lhs: [WeekUpdateSection], _ rhs: [WeekUpdateSection]) -> Bool {
+        WeekSchedule.isEquivalent(lhs, rhs)
     }
 
     func retryWeek() {
@@ -109,14 +151,11 @@ final class SearchViewModel: ObservableObject {
 
     /// Bangumi 日历的 weekday.id：1=周一 … 7=周日
     static func bangumiWeekdayID(for date: Date) -> Int {
-        let weekday = Calendar.current.component(.weekday, from: date) // 1=周日 … 7=周六
-        return weekday == 1 ? 7 : weekday - 1
+        WeekSchedule.bangumiWeekdayID(for: date)
     }
 
     static func currentDateKey() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: Date())
+        WeekSchedule.dateKey(Date())
     }
 
     private func prepareClient() async {
@@ -131,8 +170,15 @@ final class SearchViewModel: ObservableObject {
     // MARK: - 收藏
 
     /// 拉取我的全部收藏（翻页，建立 subjectID → 类型 映射）
-    func loadMyCollections() async {
+    /// 拉取"我的收藏"映射（subjectID → 收藏类型），供搜索/详情显示状态徽章。
+    ///
+    /// 带缓存：`BangumiPage` 每次出现都会触发一次同步，若不设防就会
+    /// **每次切回 Bangumi 都整表重拉一遍**（还包含一次 `/v0/me`）。
+    func loadMyCollections(force: Bool = false) async {
         guard let client, isLoggedIn else { return }
+        if !force, let at = collectionsLoadedAt, Date().timeIntervalSince(at) < collectionsTTL {
+            return
+        }
         do {
             let me = try await client.currentUser()
             var offset = 0
@@ -150,9 +196,17 @@ final class SearchViewModel: ObservableObject {
                 offset += pageSize
                 if offset >= (page.total ?? 0) || page.data.count < pageSize { break }
             }
+            collectionsLoadedAt = Date()
         } catch {
-            // 收藏拉取失败不阻塞搜索（仅影响状态显示）
+            // 收藏拉取失败不阻塞搜索（仅影响状态显示）；
+            // 仍然记录时间，避免网络异常时被反复触发
+            collectionsLoadedAt = Date()
         }
+    }
+
+    /// 收藏状态被改动（改/移除）后调用：下次需要时重新拉取
+    func invalidateMyCollections() {
+        collectionsLoadedAt = nil
     }
 
     /// 某条目我的收藏状态（未收藏返回 nil）

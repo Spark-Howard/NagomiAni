@@ -177,7 +177,7 @@ struct PlayerView: View {
 
             if !model.hideBindingBar {
                 if let subject = model.boundSubject {
-                    Label(subject.nameCN ?? subject.name ?? "已关联", systemImage: "checkmark.circle.fill")
+                    Label(subject.displayName.isEmpty ? "已关联" : subject.displayName, systemImage: "checkmark.circle.fill")
                         .font(.footnote)
                     Button("更换") {
                         model.isBindSheetPresented = true

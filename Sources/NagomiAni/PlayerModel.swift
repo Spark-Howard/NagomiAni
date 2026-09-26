@@ -242,7 +242,7 @@ final class PlayerModel: ObservableObject {
         var ids = bindingIDs()
         var names = boundNames()
         ids[media.seriesKey] = subject.id
-        names[media.seriesKey] = subject.nameCN ?? subject.name ?? "未命名"
+        names[media.seriesKey] = subject.displayName.isEmpty ? "未命名" : subject.displayName
         UserDefaults.standard.set(ids, forKey: Self.bindingsKey)
         UserDefaults.standard.set(names, forKey: Self.boundNamesKey)
         boundSubject = subject
@@ -269,7 +269,7 @@ final class PlayerModel: ObservableObject {
         var names = boundNames()
         ids[media.seriesKey] = subjectID
         if let subject {
-            names[media.seriesKey] = subject.nameCN ?? subject.name ?? "未命名"
+            names[media.seriesKey] = subject.displayName.isEmpty ? "未命名" : subject.displayName
         }
         UserDefaults.standard.set(ids, forKey: Self.bindingsKey)
         UserDefaults.standard.set(names, forKey: Self.boundNamesKey)

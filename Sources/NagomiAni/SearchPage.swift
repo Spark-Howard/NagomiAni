@@ -5,6 +5,8 @@ import NagomiAniCore
 /// 浏览页：搜索 Bangumi 词条 → 查看剧目详情（仿 Bangumi 条目页布局）
 struct SearchPage: View {
     @ObservedObject var model: SearchViewModel
+    /// 屏幕缩放（1 / 2 / 3）：用来按物理像素挑选封面分辨率，避免 Retina 上发糊
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         ZStack {
@@ -82,13 +84,29 @@ struct SearchPage: View {
                 Text("过去一周")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                // 缓存时间：让"秒开的是缓存、后台正在核对"对用户可见
+                if let updated = model.weekUpdatedAt {
+                    Text("更新于 \(Self.clockFormatter.string(from: updated))")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+
                 Spacer()
+
+                // 后台静默核对：细进度条，不遮挡已有列表
+                if model.isRefreshingWeekInBackground {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .help("正在核对最新放送日历…")
+                }
                 if model.isLoadingWeek {
                     ProgressView()
                         .controlSize(.small)
                 } else {
                     Button("刷新") { model.retryWeek() }
                         .controlSize(.small)
+                        .disabled(model.isRefreshingWeekInBackground)
                 }
             }
             .padding(.horizontal, 16)
@@ -167,27 +185,37 @@ struct SearchPage: View {
     }
 
     /// 大封面卡片：大图 + 标题，点击进入详情
+    ///
+    /// 两个要点：
+    /// 1. **改用 `CoverImageView` 而不是 `AsyncImage`** —— 详情页的大封面用它正是为了
+    ///    避开 AsyncImage 的缩放假疵；周更卡片同样是大图缩小，走同一条可靠路径。
+    /// 2. 分辨率按屏幕缩放挑档（`bestURL`）。实测：**2x** 屏上 `common`(400px) 对
+    ///    112×152pt 卡片已有 1.79 倍余量，换 `medium`(800px) 锐度几乎一样
+    ///    （拉普拉斯能量 189.26 vs 189.43），所以 2x 下不浪费流量升档；
+    ///    **3x** 屏才真的需要升到 `medium`。
     private func weekCoverCard(_ subject: Subject) -> some View {
         Button {
             model.open(subject: subject)
         } label: {
             VStack(alignment: .leading, spacing: 5) {
-                AsyncImage(url: Self.imageURL(subject.images?.common)) { image in
-                    image.resizable().scaledToFit()
-                } placeholder: {
-                    Rectangle()
-                        .fill(Color.gray.opacity(0.15))
-                        .overlay { Image(systemName: "film").foregroundStyle(.secondary) }
-                }
-                .frame(width: 112, height: 152)
+                CoverImageView(url: Self.imageURL(
+                    subject.images?.bestURL(
+                        targetHeight: Self.weekCoverHeight,
+                        scale: displayScale,
+                        // 3x 屏下 common 只有 1.19 倍余量会发软 → 给足余量升到 medium；
+                        // 2x 屏不升，省流量（实测两者锐度一致）。
+                        headroom: displayScale >= 3 ? 1.6 : 1.3
+                    )
+                ))
+                .frame(width: Self.weekCoverWidth, height: Self.weekCoverHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
 
-                Text(subject.nameCN ?? subject.name ?? "?")
+                Text(subject.displayName.isEmpty ? "?" : subject.displayName)
                     .font(.caption)
                     .foregroundStyle(.primary)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
-                    .frame(width: 112, alignment: .leading)
+                    .frame(width: Self.weekCoverWidth, alignment: .leading)
 
                 HStack(spacing: 6) {
                     if let score = subject.rating?.score {
@@ -195,22 +223,35 @@ struct SearchPage: View {
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
-                    if let eps = subject.totalEpisodes {
+                    if let eps = subject.episodeCount {
                         Text("\(eps) 话")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                 }
-                .frame(width: 112, alignment: .leading)
+                .frame(width: Self.weekCoverWidth, alignment: .leading)
             }
         }
         .buttonStyle(.plain)
-        .help(subject.nameCN ?? subject.name ?? "")
+        .help(subject.displayName)
     }
+
+    private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    /// 每周更新卡片封面尺寸（与上面 frame 保持一致）
+    static let weekCoverWidth: CGFloat = 112
+    static let weekCoverHeight: CGFloat = 152
 
     private func resultRow(_ subject: Subject) -> some View {
         HStack(spacing: 12) {
-            AsyncImage(url: Self.imageURL(subject.images?.common)) { image in
+            // 44×60pt 缩略图也按屏幕缩放挑档：小图没必要拉 400px 的大图
+            AsyncImage(url: Self.imageURL(
+                subject.images?.bestURL(targetHeight: 60, scale: displayScale)
+            )) { image in
                 image.resizable().scaledToFit()
             } placeholder: {
                 Rectangle().fill(Color.gray.opacity(0.15))
@@ -220,18 +261,18 @@ struct SearchPage: View {
             .clipShape(RoundedRectangle(cornerRadius: 4))
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(subject.nameCN ?? subject.name ?? "未命名")
+                Text(subject.displayName.isEmpty ? "未命名" : subject.displayName)
                     .font(.body)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                if let name = subject.name, name != subject.nameCN {
+                if let name = subject.name, !name.isEmpty, name != subject.nameCN {
                     Text(name)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 HStack(spacing: 8) {
-                    if let eps = subject.totalEpisodes {
+                    if let eps = subject.episodeCount {
                         Text("共 \(eps) 集")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
@@ -259,7 +300,7 @@ struct SearchPage: View {
 
     // MARK: - 工具
 
-    fileprivate static func imageURL(_ string: String?) -> URL? {
+    static func imageURL(_ string: String?) -> URL? {
         guard let string, let url = URL(string: string) else { return nil }
         return url
     }
@@ -300,11 +341,7 @@ struct SubjectDetailView: View {
 
     /// 主标题：优先用已加载的 v0 详情（Bangumi 收藏打开时传入的条目可能只有 id）
     private var primaryTitle: String {
-        model.detailSubject?.nameCN
-            ?? model.detailSubject?.name
-            ?? subject.nameCN
-            ?? subject.name
-            ?? ""
+        firstNonEmptyName(model.detailSubject?.displayName, subject.displayName) ?? "—"
     }
 
     /// 原名（副标题）：与主标题不同才显示
@@ -603,9 +640,9 @@ struct SubjectDetailView: View {
                 if let action = pendingAction {
                     switch action {
                     case .set(let type):
-                        Text("将「\(subject.nameCN ?? subject.name ?? "该条目")」的收藏状态修改为「\(SearchViewModel.collectionName(type))」并同步到 Bangumi？")
+                        Text("将「\(subject.displayName.isEmpty ? "该条目" : subject.displayName)」的收藏状态修改为「\(SearchViewModel.collectionName(type))」并同步到 Bangumi？")
                     case .remove:
-                        Text("确定将「\(subject.nameCN ?? subject.name ?? "该条目")」从收藏中移除吗？")
+                        Text("确定将「\(subject.displayName.isEmpty ? "该条目" : subject.displayName)」从收藏中移除吗？")
                     }
                 }
             }
@@ -668,10 +705,10 @@ struct SubjectDetailView: View {
                                 .frame(width: 58, alignment: .trailing)
                                 .padding(.top, 2)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(ep.nameCN ?? ep.name ?? "—")
+                                Text(ep.displayName.isEmpty ? "—" : ep.displayName)
                                     .font(.body)
                                     .foregroundStyle(.primary)
-                                if let name = ep.name, name != ep.nameCN {
+                                if let name = ep.name, !name.isEmpty, name != ep.nameCN {
                                     Text(name)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -720,7 +757,7 @@ struct SubjectDetailView: View {
                             }
                             .frame(width: 58, height: 76)
                             .clipShape(RoundedRectangle(cornerRadius: 4))
-                            Text(character.nameCN ?? character.name ?? "?")
+                            Text(character.displayName.isEmpty ? "?" : character.displayName)
                                 .font(.caption)
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
@@ -747,7 +784,7 @@ struct SubjectDetailView: View {
                 LazyVStack(spacing: 4) {
                     ForEach(staff) { person in
                         HStack(spacing: 8) {
-                            Text(person.nameCN ?? person.name ?? "?")
+                            Text(person.displayName.isEmpty ? "?" : person.displayName)
                                 .font(.callout)
                                 .foregroundStyle(.primary)
                             if let job = person.jobs?.first, !job.isEmpty {
@@ -984,58 +1021,5 @@ struct FlowLayout: Layout {
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
-    }
-}
-
-
-// MARK: - 封面图片（NSImageView 确定性渲染）
-
-/// 用 NSImageView 直接渲染远程封面：完整显示整张图（等比缩放，不裁切中间）。
-/// 注意：不要用 `imageScaling = .scaleProportionallyUpOrDown` + `wantsLayer` 的组合——
-/// 在 layer-backed 的 NSImageView 上它可能按图片原始尺寸居中绘制、再被 masksToBounds 裁掉四周，
-/// 于是只看到中间。改用 layer.contents + contentsGravity = .resizeAspect 可靠地"整图等比放缩进框"。
-struct CoverImageView: NSViewRepresentable {
-    let url: URL?
-    /// 简单内存缓存（同一次运行内避免重复下载）
-    private static var cache: [String: NSImage] = [:]
-
-    func makeNSView(context: Context) -> NSImageView {
-        let view = NSImageView()
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.15).cgColor
-        view.layer?.cornerRadius = 8
-        view.layer?.masksToBounds = true
-        view.layer?.contentsGravity = .resizeAspect
-        return view
-    }
-
-    func updateNSView(_ view: NSImageView, context: Context) {
-        guard let url else {
-            view.layer?.contents = nil
-            return
-        }
-        if let cached = Self.cache[url.absoluteString] {
-            apply(image: cached, to: view)
-            return
-        }
-        Task.detached(priority: .userInitiated) {
-            if let image = NSImage(contentsOf: url) {
-                await MainActor.run {
-                    Self.cache[url.absoluteString] = image
-                    apply(image: image, to: view)
-                }
-            }
-        }
-    }
-
-    /// 把图片以"整图等比缩放"画进 layer（.resizeAspect = contain，居中，不裁切）
-    private func apply(image: NSImage, to view: NSImageView) {
-        view.image = nil
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            view.layer?.contents = nil
-            return
-        }
-        view.layer?.contents = cg
-        view.layer?.contentsGravity = .resizeAspect
     }
 }

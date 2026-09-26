@@ -122,7 +122,7 @@ public struct CalendarDay: Codable, Sendable {
 }
 
 /// 条目（GET /v0/subjects/{id}）
-public struct Subject: Codable, Sendable, Identifiable {
+public struct Subject: Codable, Sendable, Identifiable, ChineseNamed {
     public let id: Int
     public let type: SubjectType?
     public let name: String?
@@ -184,6 +184,88 @@ public struct Subject: Codable, Sendable, Identifiable {
             var comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
             comps?.scheme = "https"
             return comps?.url?.absoluteString ?? raw
+        }
+
+        // MARK: - 按显示尺寸挑分辨率
+
+        /// 各变体的实际像素尺寸（Bangumi CDN 的 `r/N` 缩放规则，实测值）：
+        ///
+        /// | 变体 | URL | 实际像素 |
+        /// |---|---|---|
+        /// | grid   | `/r/100/` | 100×142 |
+        /// | small  | `/r/200/` | 200×283 |
+        /// | common | `/r/400/` | 400×566 |
+        /// | medium | `/r/800/` | 800×1132 |
+        /// | large  | 无前缀（原图） | 975×1380 |
+        ///
+        /// 注意 `common` 只有 400px 宽：`112×152pt` 的卡片在 3x 屏上需要 336×456px，
+        /// 400px 只是"刚好够"，实际会偏糊；2x 屏（需 224px）也只有 1.8 倍余量。
+        private static let variantWidths: [(key: String, width: Int)] = [
+            ("grid", 100), ("small", 200), ("common", 400), ("medium", 800), ("large", 975),
+        ]
+
+        /// 按目标显示尺寸挑选**够清晰且最省流量**的一档。
+        ///
+        /// - Parameters:
+        ///   - targetHeight: 目标显示高度（pt）
+        ///   - aspectRatio: 封面宽高比（默认 Bangumi 封面约 0.71）
+        ///   - scale: 屏幕缩放（Retina 取 2 或 3，来自 `@Environment(\.displayScale)`）
+        ///   - headroom: 清晰度余量。1.0 = 只要求"刚好够"，调大则要求更多余量、更易升档。
+        ///     **实测 1.0 会偏糊**：`common`(400px) 对 3x 的 152pt 卡片（需 324px）
+        ///     只多 23%，缩到屏幕尺寸时细节发软，因此默认 1.3。
+        ///
+        /// 换档靠替换 `large` URL 里的 `/r/N` 缩放段实现，保证是同一张图。
+        public func bestURL(
+            targetHeight: CGFloat,
+            aspectRatio: CGFloat = 0.71,
+            scale: CGFloat = 2,
+            headroom: CGFloat = 1.3
+        ) -> String? {
+            let neededWidth = Int((targetHeight * aspectRatio * scale * headroom).rounded(.up))
+
+            let chosen = Self.variantWidths.first { $0.width >= neededWidth } ?? Self.variantWidths.last!
+            if chosen.key == "large", let large { return large }
+
+            // 由 large 换档（同一张图，只改 r/N）
+            if let rewritten = Self.rewritingScale(of: large, to: chosen.width) { return rewritten }
+
+            // 没有 large 可用：至少给出原有的 common，别返回 nil
+            return common ?? value(for: chosen.key)
+        }
+
+        private func value(for key: String) -> String? {
+            switch key {
+            case "grid": return grid
+            case "small": return small
+            case "common": return common
+            case "medium": return medium
+            case "large": return large
+            default: return nil
+            }
+        }
+
+        /// 把 `https://lain.bgm.tv/r/800/pic/cover/l/xx/yy/id.jpg` 里的缩放段换成 `r/width`
+        ///
+        /// 只有当 `large` 与目标同源（去掉 `/r/N` 后路径一致）时才做替换，
+        /// 否则返回 nil，由调用方回退到原 URL。
+        private static func rewritingScale(of large: String?, to width: Int) -> String? {
+            guard let large, let range = large.range(of: "/pic/") else { return nil }
+            let prefix = large[large.startIndex..<range.lowerBound]
+            let suffix = large[range.lowerBound...]
+
+            // 前缀应形如 https://lain.bgm.tv 或 https://lain.bgm.tv/r/800
+            guard let hostEnd = prefix.range(of: "://").map({ $0.upperBound }) else { return nil }
+            let afterScheme = prefix[hostEnd...]
+            guard let slash = afterScheme.firstIndex(of: "/") else {
+                // 纯主机名，没有缩放段
+                return "\(prefix)/r/\(width)\(suffix)"
+            }
+            let host = afterScheme[..<slash]
+            let rest = afterScheme[slash...]
+            // rest 要么是 "/r/N"，要么就是 "/pic/..." 前面没有缩放段
+            let isScaleSegment = rest.hasPrefix("/r/")
+            let newPrefix = isScaleSegment ? "\(prefix[..<hostEnd])\(host)/r/\(width)" : "\(prefix[..<hostEnd])\(host)"
+            return "\(newPrefix)\(suffix)"
         }
     }
 
@@ -317,7 +399,7 @@ public struct Subject: Codable, Sendable, Identifiable {
 }
 
 /// 单集（GET /v0/episodes）
-public struct Episode: Codable, Sendable, Identifiable {
+public struct Episode: Codable, Sendable, Identifiable, ChineseNamed {
     public let id: Int
     public let type: Int?
     public let sort: Double?
@@ -513,7 +595,7 @@ public struct LegacyUser: Codable, Sendable {
 }
 
 /// 旧版单集（含分集简介/评论数）
-public struct LegacyEpisode: Codable, Sendable, Identifiable {
+public struct LegacyEpisode: Codable, Sendable, Identifiable, ChineseNamed {
     public let id: Int
     public let type: Int?
     public let sort: Double?
@@ -608,7 +690,7 @@ public struct LegacyBlog: Codable, Sendable, Identifiable {
 }
 
 /// 角色
-public struct LegacyCharacter: Codable, Sendable, Identifiable {
+public struct LegacyCharacter: Codable, Sendable, Identifiable, ChineseNamed {
     public let id: Int
     public let url: String?
     public let name: String?
@@ -634,7 +716,7 @@ public struct LegacyCharacter: Codable, Sendable, Identifiable {
 }
 
 /// 制作人员
-public struct LegacyStaff: Codable, Sendable, Identifiable {
+public struct LegacyStaff: Codable, Sendable, Identifiable, ChineseNamed {
     public let id: Int
     public let url: String?
     public let name: String?
@@ -719,5 +801,49 @@ public struct LegacySubject: Codable, Sendable {
         blog = (try? c.decodeIfPresent([LegacyBlog].self, forKey: .blog)) ?? nil
         crt = (try? c.decodeIfPresent([LegacyCharacter].self, forKey: .crt)) ?? nil
         staff = (try? c.decodeIfPresent([LegacyStaff].self, forKey: .staff)) ?? nil
+    }
+}
+
+// MARK: - 名称回退（Bangumi 会把 name_cn 返回成空字符串）
+
+/// 去掉首尾空白后仍非空才算有效名称。
+/// Bangumi 的 `name_cn` 对尚无中文名的条目会返回 **空字符串 `""`**（不是 nil），
+/// 因此 `nameCN ?? name` 这种写法会把空串当成有效值，渲染出空白名称。
+public func firstNonEmptyName(_ candidates: String?...) -> String? {
+    for candidate in candidates {
+        guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { continue }
+        return trimmed
+    }
+    return nil
+}
+
+/// 拥有 `name` / `nameCN` 的条目模型：统一的展示名回退规则。
+///
+/// ⚠️ 一律用 `displayName`，不要写 `nameCN ?? name`。
+/// 实测反例：条目 454684「BanG Dream! Ave Mujica」返回
+/// `name_cn = ""`、`name = "BanG Dream! Ave Mujica"`，用 `??` 会显示空白。
+public protocol ChineseNamed {
+    var name: String? { get }
+    var nameCN: String? { get }
+}
+
+public extension ChineseNamed {
+    /// 中文名优先（空串视为缺失），否则原名，都没有则空串
+    var displayName: String {
+        firstNonEmptyName(nameCN, name) ?? ""
+    }
+}
+
+public extension Subject {
+    /// 用于显示「共 N 集 / 进度 x/N」的总集数。
+    ///
+    /// ⚠️ **收藏列表接口只有 `eps`，没有 `total_episodes`**（实测：
+    /// `/v0/users/{u}/collections` 的 subject 是 `eps=13`、`total_episodes` 缺失；
+    /// `/v0/subjects/{id}` 两者都有）。所以只读 `totalEpisodes` 会显示成 0 集。
+    /// 这里回退到 `eps`，列表一出来即显示正确集数；详情接口拉到
+    /// `total_episodes` 后（见 AccountViewModel 的后台补全）会更新为权威值。
+    var episodeCount: Int? {
+        totalEpisodes ?? eps
     }
 }

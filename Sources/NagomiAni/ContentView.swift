@@ -14,6 +14,8 @@ struct ContentView: View {
     @State private var loginReturnTarget: SidebarItem?
     /// 全屏时隐藏侧边栏，让视频占满整个屏幕（无 UI 边框）
     @State private var isFullScreen = false
+    /// 已经访问过的页面：只挂载访问过的，之后不再销毁重建
+    @State private var visited: Set<SidebarItem> = [.player]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -98,9 +100,36 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
+    /// 页面容器：**已访问过的页面全部保留挂载**，只切换显隐（opacity + 命中测试）。
+    ///
+    /// 为什么不用 `switch`：switch 会销毁/重建整棵页面子树，于是每次切回来
+    /// 都要重新走一遍 `onAppear`（重新请求数据）并丢失滚动位置与内部状态，
+    /// 表现为"切回 Bangumi 又要重新加载一遍"。
+    ///
+    /// 惰性挂载：没访问过的页面不挂载，避免启动时就建起聊天页 WebView、
+    /// 播放器渲染视图等重资源。`visited` 只增不减。
     private var content: some View {
-        switch selection {
+        ZStack {
+            ForEach(SidebarItem.allCases) { item in
+                if visited.contains(item) {
+                    page(for: item)
+                        // 隐藏用 opacity 而非 removeFromHierarchy：视图与状态都保住
+                        .opacity(selection == item ? 1 : 0)
+                        .allowsHitTesting(selection == item)
+                        // 不可见页面不应被辅助功能/键盘遍历到
+                        .accessibilityHidden(selection != item)
+                        .zIndex(selection == item ? 1 : 0)
+                }
+            }
+        }
+        .onChange(of: selection) { newValue in
+            if let newValue { visited.insert(newValue) }
+        }
+    }
+
+    @ViewBuilder
+    private func page(for item: SidebarItem) -> some View {
+        switch item {
         case .library:
             LibraryPage(model: library) { url in
                 // 防御：索引残留了磁盘上已不存在的文件（正常应在"更新"重扫时清掉）——
@@ -133,7 +162,7 @@ struct ContentView: View {
             ChatPage(account: account, web: webChat)
         case .search:
             SearchPage(model: search)
-        case .player, nil:
+        case .player:
             PlayerView(model: model)
         }
     }

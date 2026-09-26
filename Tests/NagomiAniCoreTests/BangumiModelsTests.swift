@@ -121,4 +121,199 @@ final class BangumiModelsTests: XCTestCase {
         XCTAssertEqual(subject.tags?.first?.name, "SUNRISE")
         XCTAssertEqual(subject.collection?.doing, 3)
     }
+
+    // MARK: - 展示名回退（回归：收藏列表"有的条目不显示名称"）
+
+    /// Bangumi 对尚无中文名的条目会返回 `name_cn: ""`（空串而非 null）。
+    /// 用 `nameCN ?? name` 会把空串当有效值渲染成空白，必须走 displayName。
+    func testDisplayNameFallsBackWhenNameCNIsEmptyString() throws {
+        let json = """
+        {"id": 454684, "name": "BanG Dream! Ave Mujica", "name_cn": ""}
+        """.data(using: .utf8)!
+
+        let subject = try JSONDecoder().decode(Subject.self, from: json)
+        XCTAssertEqual(subject.nameCN, "")
+        XCTAssertEqual(subject.displayName, "BanG Dream! Ave Mujica",
+                       "name_cn 为空串时必须回退到原名，而不是显示空白")
+    }
+
+    /// 仅有空白字符的 name_cn 同样视为缺失
+    func testDisplayNameTreatsWhitespaceOnlyAsMissing() throws {
+        let json = """
+        {"id": 1, "name": "OnlyRomaji", "name_cn": "   "}
+        """.data(using: .utf8)!
+
+        let subject = try JSONDecoder().decode(Subject.self, from: json)
+        XCTAssertEqual(subject.displayName, "OnlyRomaji")
+    }
+
+    /// 有中文名时优先用中文名（并去掉首尾空白）
+    func testDisplayNamePrefersChineseName() throws {
+        let json = """
+        {"id": 3816, "name": "頭文字D Fourth Stage", "name_cn": " 头文字D Fourth Stage "}
+        """.data(using: .utf8)!
+
+        let subject = try JSONDecoder().decode(Subject.self, from: json)
+        XCTAssertEqual(subject.displayName, "头文字D Fourth Stage")
+    }
+
+    /// 两个名字都缺失时返回空串（由调用方决定占位文案）
+    func testDisplayNameEmptyWhenBothMissing() throws {
+        let json = """
+        {"id": 2, "name": null, "name_cn": null}
+        """.data(using: .utf8)!
+
+        let subject = try JSONDecoder().decode(Subject.self, from: json)
+        XCTAssertEqual(subject.displayName, "")
+    }
+
+    /// 收藏接口返回的嵌套 subject 也走同一套回退
+    func testCollectionSubjectDisplayNameWithEmptyNameCN() throws {
+        let json = """
+        {"subject_id": 454684, "type": 3,
+         "subject": {"name": "BanG Dream! Ave Mujica", "name_cn": "", "images": {}}}
+        """.data(using: .utf8)!
+
+        let collection = try JSONDecoder().decode(UserSubjectCollection.self, from: json)
+        XCTAssertEqual(collection.subject?.displayName, "BanG Dream! Ave Mujica")
+    }
+
+    /// Episode 等其它条目模型共用同一回退规则
+    func testEpisodeDisplayNameWithEmptyNameCN() throws {
+        let json = """
+        {"id": 1, "name": "第1话 素晴らしい世界", "name_cn": ""}
+        """.data(using: .utf8)!
+
+        let episode = try JSONDecoder().decode(Episode.self, from: json)
+        XCTAssertEqual(episode.displayName, "第1话 素晴らしい世界")
+    }
+
+    // MARK: - 总集数回退（回归：进度显示"总共 0 集"）
+
+    /// 收藏列表接口只给 `eps`，不给 `total_episodes`。
+    /// 直接读 totalEpisodes 会得到 nil → 界面显示 0 集。
+    func testEpisodeCountFallsBackToEpsWhenTotalEpisodesMissing() throws {
+        let json = """
+        {"id": 454684, "name": "BanG Dream! Ave Mujica", "eps": 13}
+        """.data(using: .utf8)!
+
+        let subject = try JSONDecoder().decode(Subject.self, from: json)
+        XCTAssertNil(subject.totalEpisodes, "收藏列表接口不返回 total_episodes")
+        XCTAssertEqual(subject.eps, 13)
+        XCTAssertEqual(subject.episodeCount, 13, "必须回退到 eps，否则显示成 0 集")
+    }
+
+    /// 详情接口两个字段都有时，以 total_episodes 为准
+    func testEpisodeCountPrefersTotalEpisodes() throws {
+        let json = """
+        {"id": 1, "name": "X", "eps": 13, "total_episodes": 13}
+        """.data(using: .utf8)!
+
+        let subject = try JSONDecoder().decode(Subject.self, from: json)
+        XCTAssertEqual(subject.episodeCount, 13)
+    }
+
+    /// 两个都没有时返回 nil（界面用"进度 x 集"而不是误导性的 /0）
+    func testEpisodeCountNilWhenBothMissing() throws {
+        let json = """
+        {"id": 2, "name": "未定档新番"}
+        """.data(using: .utf8)!
+
+        let subject = try JSONDecoder().decode(Subject.self, from: json)
+        XCTAssertNil(subject.episodeCount)
+    }
+
+    /// 完整链路：收藏列表返回的真实形态能算出正确集数
+    func testCollectionRowEpisodeCountFromRealListShape() throws {
+        let json = """
+        {"subject_id": 454684, "type": 3, "ep_status": 1,
+         "subject": {"id": 454684, "name": "BanG Dream! Ave Mujica", "name_cn": "",
+                     "eps": 13, "type": 2, "images": {"common": "https://lain.bgm.tv/x.jpg"}}}
+        """.data(using: .utf8)!
+
+        let collection = try JSONDecoder().decode(UserSubjectCollection.self, from: json)
+        XCTAssertEqual(collection.epStatus, 1)
+        XCTAssertEqual(collection.subject?.episodeCount, 13)
+        // 空 name_cn 也要能显示名字（上一轮修复）
+        XCTAssertEqual(collection.subject?.displayName, "BanG Dream! Ave Mujica")
+    }
+
+    // MARK: - 封面分辨率挑选（回归：缩略图发糊）
+
+    private func decodeImages(_ json: String) throws -> Subject.SubjectImages {
+        try JSONDecoder().decode(Subject.SubjectImages.self, from: Data(json.utf8))
+    }
+
+    /// 真实 API 形态：large 是原图，其余是 /r/N 缩放版
+    private let realImagesJSON = """
+    {"large": "https://lain.bgm.tv/pic/cover/l/77/c3/454684_ZH5tU.jpg",
+     "common": "https://lain.bgm.tv/r/400/pic/cover/l/77/c3/454684_ZH5tU.jpg",
+     "medium": "https://lain.bgm.tv/r/800/pic/cover/l/77/c3/454684_ZH5tU.jpg",
+     "small": "https://lain.bgm.tv/r/200/pic/cover/l/77/c3/454684_ZH5tU.jpg",
+     "grid": "https://lain.bgm.tv/r/100/pic/cover/l/77/c3/454684_ZH5tU.jpg"}
+    """
+
+    /// 3x 屏上的 112×152pt 卡片：原实现只拿 common(400px)，仅比所需 336px 多 19%，会发糊。
+    /// 必须升到 medium(800px)。
+    func testBestURLUpgradesToMediumFor3xWeekCard() throws {
+        let images = try decodeImages(realImagesJSON)
+        let url = images.bestURL(targetHeight: 152, scale: 3, headroom: 1.6)
+        XCTAssertEqual(url, "https://lain.bgm.tv/r/800/pic/cover/l/77/c3/454684_ZH5tU.jpg")
+    }
+
+    /// 默认余量下，2x 屏的 112×152pt 卡片用 common 即可（不必浪费流量上 medium）
+    func testBestURLKeepsCommonFor2xWeekCardAtDefaultHeadroom() throws {
+        let images = try decodeImages(realImagesJSON)
+        let url = images.bestURL(targetHeight: 152, scale: 2)
+        XCTAssertEqual(url, "https://lain.bgm.tv/r/400/pic/cover/l/77/c3/454684_ZH5tU.jpg")
+    }
+
+    /// 小缩略图（44×60pt）应挑更小的档，不要拉大图
+    func testBestURLPicksSmallVariantForTinyThumbnail() throws {
+        let images = try decodeImages(realImagesJSON)
+        let url = images.bestURL(targetHeight: 60, scale: 2)
+        XCTAssertEqual(url, "https://lain.bgm.tv/r/200/pic/cover/l/77/c3/454684_ZH5tU.jpg")
+    }
+
+    /// 1x 屏不需要大图
+    func testBestURLPicksGridFor1xSmallCard() throws {
+        let images = try decodeImages(realImagesJSON)
+        let url = images.bestURL(targetHeight: 60, scale: 1, headroom: 1.0)
+        XCTAssertEqual(url, "https://lain.bgm.tv/r/100/pic/cover/l/77/c3/454684_ZH5tU.jpg")
+    }
+
+    /// 换档必须保持"同一张图"：只改 r/N，路径不变
+    func testBestURLKeepsSameImagePathWhenSwitchingVariant() throws {
+        let images = try decodeImages(realImagesJSON)
+        let url = images.bestURL(targetHeight: 152, scale: 3, headroom: 1.6)
+        XCTAssertTrue(url?.contains("/pic/cover/l/77/c3/454684_ZH5tU.jpg") == true,
+                      "换档不能把图片路径改掉")
+    }
+
+    /// 超大尺寸（超过原图）就回退到 large 原图
+    func testBestURLFallsBackToLargeWhenNeeded() throws {
+        let images = try decodeImages(realImagesJSON)
+        let url = images.bestURL(targetHeight: 600, scale: 3, headroom: 2.0)
+        XCTAssertEqual(url, "https://lain.bgm.tv/pic/cover/l/77/c3/454684_ZH5tU.jpg")
+    }
+
+    /// 没有 large（无法安全换档）时回退到原 common，不能返回 nil
+    func testBestURLFallsBackToCommonWithoutLarge() throws {
+        let images = try decodeImages(#"{"common":"https://lain.bgm.tv/r/400/pic/cover/l/1.jpg"}"#)
+        XCTAssertEqual(images.bestURL(targetHeight: 152, scale: 3),
+                       "https://lain.bgm.tv/r/400/pic/cover/l/1.jpg")
+    }
+
+    /// 非 bgm 主机的 URL 不应被拼改
+    func testBestURLDoesNotRewriteForeignHost() throws {
+        let images = try decodeImages(#"{"large":"https://example.com/a/b.jpg","common":"https://example.com/r/400/a/b.jpg"}"#)
+        let url = images.bestURL(targetHeight: 152, scale: 3, headroom: 1.6)
+        XCTAssertEqual(url, "https://example.com/r/400/a/b.jpg")
+    }
+
+    /// 完全没有图片信息时返回 nil（界面显示占位）
+    func testBestURLNilWhenNoImages() throws {
+        let images = try decodeImages("{}")
+        XCTAssertNil(images.bestURL(targetHeight: 152, scale: 2))
+    }
 }

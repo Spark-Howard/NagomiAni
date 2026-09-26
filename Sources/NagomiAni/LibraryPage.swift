@@ -122,7 +122,7 @@ struct LibraryPage: View {
 
     private func seriesRow(_ series: Series) -> some View {
         let subject = model.cover(for: series)
-        let title = subject?.nameCN ?? subject?.name ?? series.displayName
+        let title = (subject?.displayName.isEmpty == false ? subject?.displayName : nil) ?? series.displayName
 
         return DisclosureGroup {
             if let episodes = model.episodes(for: series), !episodes.isEmpty {
@@ -220,7 +220,7 @@ struct LibraryPage: View {
     /// 缺失集占位：虚线边框 + 问号图标 + "本地未找到"
     private func missingRow(_ ep: Episode) -> some View {
         let sort = Int((ep.sort ?? 0).rounded())
-        let title = ep.nameCN ?? ep.name
+        let title = ep.displayName
         return HStack(spacing: 10) {
             Image(systemName: "questionmark.circle.dashed")
                 .font(.system(size: 20))
@@ -230,7 +230,7 @@ struct LibraryPage: View {
                     Text("第 \(sort) 集")
                         .font(.body)
                         .foregroundStyle(.primary)
-                    if let title, !title.isEmpty {
+                    if !title.isEmpty {
                         Text(title)
                             .font(.callout)
                             .foregroundStyle(.secondary)
@@ -469,7 +469,7 @@ struct LibraryBindSheet: View {
     private func candidateRow(_ candidate: MatchCandidate) -> some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(candidate.subject.nameCN ?? candidate.subject.name ?? "未命名")
+                Text(candidate.subject.displayName.isEmpty ? "未命名" : candidate.subject.displayName)
                     .font(.body)
                     .lineLimit(1)
                 Text(candidate.subject.name ?? "")
@@ -482,7 +482,7 @@ struct LibraryBindSheet: View {
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.orange)
-            Text("共 \(candidate.subject.totalEpisodes ?? 0) 集")
+            Text("共 \(candidate.subject.episodeCount ?? 0) 集")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -493,14 +493,14 @@ struct LibraryBindSheet: View {
     private func subjectRow(_ subject: Subject) -> some View {
         HStack {
             VStack(alignment: .leading) {
-                Text(subject.nameCN ?? "—")
+                Text(subject.displayName.isEmpty ? "—" : subject.displayName)
                     .font(.body)
                 Text(subject.name ?? "")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Text("共 \(subject.totalEpisodes ?? 0) 集")
+            Text("共 \(subject.episodeCount ?? 0) 集")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

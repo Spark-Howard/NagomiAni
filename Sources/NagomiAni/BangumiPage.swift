@@ -130,18 +130,42 @@ struct BangumiPage: View {
 
     private var collectionsList: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 8) {
                 Text(model.collectionType.displayName)
                     .font(.subheadline)
+
+                // 缓存时间：让"秒开的是缓存、后台正在核对"这件事对用户可见
+                if let updated = model.lastUpdated {
+                    Text("更新于 \(Self.timeFormatter.string(from: updated))")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+
                 Spacer()
+
+                // 后台静默刷新：细进度条，不遮挡已有列表
+                if model.isRefreshingInBackground {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .help("正在核对最新收藏…")
+                }
                 if model.isLoading {
                     ProgressView()
                         .controlSize(.small)
                 }
+
+                Button {
+                    Task { await model.refreshCollections() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isLoading || model.isRefreshingInBackground)
+                .help("重新拉取当前收藏（跳过缓存）")
             }
 
             if model.collections.isEmpty {
-                Text("暂无收藏条目")
+                Text(model.isLoading ? "加载中…" : "暂无收藏条目")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -156,6 +180,25 @@ struct BangumiPage: View {
                 }
             }
         }
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+
+    /// 进度文案：进度 x/N 集。
+    ///
+    /// 总集数用 `episodeCount`（`total_episodes` 缺失时回退 `eps`）——收藏列表
+    /// 接口不返回 `total_episodes`，直接读它会永远显示 0 集。
+    /// 总集数确实未知（如未播完的新番）时显示"进度 x 集"，不显示误导性的 /0。
+    private static func progressText(for collection: UserSubjectCollection) -> String {
+        let watched = collection.epStatus ?? 0
+        guard let total = collection.subject?.episodeCount, total > 0 else {
+            return "进度 \(watched) 集"
+        }
+        return "进度 \(watched)/\(total) 集"
     }
 
     /// 点击整行 → 打开该条目详情页（返回后仍停留在此 Bangumi 页面）
@@ -173,7 +216,7 @@ struct BangumiPage: View {
                     summary: nil,
                     airDate: nil,
                     eps: nil,
-                    totalEpisodes: collection.subject?.totalEpisodes,
+                    totalEpisodes: collection.subject?.episodeCount,
                     images: collection.subject?.images,
                     rating: nil
                 )
@@ -181,26 +224,18 @@ struct BangumiPage: View {
             }
         } label: {
             HStack(spacing: 10) {
-                if let imageURL = collection.subject?.images?.common,
-                   let url = URL(string: imageURL) {
-                    AsyncImage(url: url) { image in
-                        image.resizable().scaledToFit()
-                    } placeholder: {
-                        Rectangle().fill(Color.gray.opacity(0.2))
-                    }
-                    .frame(width: 36, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                } else {
-                    Rectangle()
-                        .fill(Color.gray.opacity(0.2))
-                        .frame(width: 36, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                }
+                // 用带缓存的 CoverImageView，而不是无缓存的 AsyncImage ——
+                // 切换模块会重建整页，AsyncImage 每次都会重下所有封面（表现为一直灰）
+                CoverImageView(
+                    url: SearchPage.imageURL(collection.subject?.images?.common),
+                    cornerRadius: 4
+                )
+                .frame(width: 36, height: 48)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(collection.subject?.nameCN ?? collection.subject?.name ?? "未知条目")
+                    Text(collection.subject?.displayName.isEmpty == false ? collection.subject!.displayName : "未知条目")
                         .lineLimit(1)
-                    Text("进度 \(collection.epStatus ?? 0)/\(collection.subject?.totalEpisodes ?? 0) 集")
+                    Text(Self.progressText(for: collection))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

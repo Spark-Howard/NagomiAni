@@ -283,7 +283,7 @@ final class LibraryViewModel: ObservableObject {
         // 清除候选缓存：已关联不再显示"建议 N"，且之后点"更换"会重新匹配
         candidates[seriesKey] = nil
         bindTarget = nil
-        statusMessage = "已关联「\(subject.nameCN ?? subject.name ?? "")」"
+        statusMessage = "已关联「\(subject.displayName)」"
         reload()
     }
 

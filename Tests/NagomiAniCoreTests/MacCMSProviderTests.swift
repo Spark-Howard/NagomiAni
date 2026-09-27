@@ -86,12 +86,55 @@ final class MacCMSProviderTests: XCTestCase {
     func testDecodeListWithStringID() throws {
         // 一些站点的 vod_id 是字符串
         let data = Data(#"""
-        {"list":[{"vod_id":"67890","vod_name":"字符串ID番","vod_remarks":"HD中字"}]}
+        {"list":[{"vod_id":"67890","vod_name":"字符串ID番","type_name":"日本动漫","vod_remarks":"HD中字"}]}
         """#.utf8)
         let shows = try MacCMSProvider.shows(from: data, providerID: "test.host")
         XCTAssertEqual(shows.count, 1)
         XCTAssertEqual(shows[0].showID, "67890")
-        XCTAssertEqual(shows[0].subtitle, "HD中字")
+        XCTAssertEqual(shows[0].subtitle, "日本动漫 · HD中字")
+    }
+
+    // MARK: - 动漫内容过滤（真人电影/解说/体育等不纳入）
+
+    /// 目录与搜索共用 shows(from:)：只保留动漫类目，类目下误挂的解说剔除
+    func testShowsFilteredToAnimeCategories() throws {
+        let data = Data(#"""
+        {"list":[
+            {"vod_id":1,"vod_name":"葬送的芙莉莲","type_name":"日本动漫"},
+            {"vod_id":2,"vod_name":"速度与激情10","type_name":"动作片"},
+            {"vod_id":3,"vod_name":"奔跑吧兄弟","type_name":"综艺"},
+            {"vod_id":4,"vod_name":"NBA总决赛集锦","type_name":"体育"},
+            {"vod_id":5,"vod_name":"你的名字","type_name":"动画电影"},
+            {"vod_id":6,"vod_name":"魔法少女小圆 剧场版","type_name":"剧场版"},
+            {"vod_id":7,"vod_name":"葬送的芙莉莲 全网解说","type_name":"日本动漫"},
+            {"vod_id":8,"vod_name":"鬼灭之刃 三分钟速看","type_name":"日本动漫"},
+            {"vod_id":9,"vod_name":"无类型条目"}
+        ]}
+        """#.utf8)
+        let shows = try MacCMSProvider.shows(from: data, providerID: "test.host")
+        // 只剩：1(日本动漫) 5(动画电影) 6(剧场版)；7/8 因标题含解说/速看被剔除；其余类目不符
+        XCTAssertEqual(shows.map(\.showID), ["1", "5", "6"])
+    }
+
+    /// 分类树 → 动漫相关类目 id（自身命中或父类目命中）
+    func testAnimeTypeIDsFromClassTree() {
+        let categories = [
+            MacCMSProvider.category(from: ["type_id": 1, "type_pid": 0, "type_name": "电影"]),
+            MacCMSProvider.category(from: ["type_id": 5, "type_pid": 1, "type_name": "动画电影"]),
+            MacCMSProvider.category(from: ["type_id": 2, "type_pid": 0, "type_name": "动漫"]),
+            MacCMSProvider.category(from: ["type_id": 21, "type_pid": 2, "type_name": "日本动漫"]),
+            MacCMSProvider.category(from: ["type_id": 30, "type_pid": 2, "type_name": "国产动漫"]),
+            MacCMSProvider.category(from: ["type_id": 9, "type_pid": 0, "type_name": "体育"]),
+        ]
+        let ids = MacCMSProvider.animeTypeIDs(from: categories)
+        XCTAssertEqual(Set(ids), ["5", "2", "21", "30"])
+    }
+
+    func testIsJunkTitle() {
+        XCTAssertTrue(MacCMSProvider.isJunkTitle("葬送的芙莉莲 全网解说"))
+        XCTAssertTrue(MacCMSProvider.isJunkTitle("鬼灭之刃三分钟速看"))
+        XCTAssertFalse(MacCMSProvider.isJunkTitle("葬送的芙莉莲"))
+        XCTAssertFalse(MacCMSProvider.isJunkTitle(nil))
     }
 
     func testDecodeListGarbageThrows() {

@@ -58,12 +58,34 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
         base.host ?? "maccms"
     }
 
+    /// 默认目录：先取一页拿分类树锁定动漫类目，再按类目各取最新一页；
+    /// 真人电影/剧集/综艺/体育等不纳入（类目过滤 + 标题兜底，见 shows(from:)）
     public func listShows() async throws -> [OnlineShow] {
-        let data = try await fetch(queryItems: [
+        let firstPage = try await fetch(queryItems: [
             URLQueryItem(name: "ac", value: "list"),
             URLQueryItem(name: "pg", value: "1")
         ])
-        return try Self.shows(from: data, providerID: id)
+        let response = try Self.decodeList(firstPage)
+        var shows = try Self.shows(from: firstPage, providerID: id)
+        if shows.isEmpty, response.list.isEmpty, Self.animeTypeIDs(from: response.categories).isEmpty {
+            return [] // 站点没有动漫类目也没有内容
+        }
+
+        // 按动漫类目各拉最新一页（限 4 个类目防请求爆炸）
+        let typeIDs = Self.animeTypeIDs(from: response.categories).prefix(4)
+        var seen = Set(shows.map(\.showID))
+        for typeID in typeIDs {
+            let data = try await fetch(queryItems: [
+                URLQueryItem(name: "ac", value: "list"),
+                URLQueryItem(name: "t", value: typeID),
+                URLQueryItem(name: "pg", value: "1")
+            ])
+            for show in try Self.shows(from: data, providerID: id) where !seen.contains(show.showID) {
+                seen.insert(show.showID)
+                shows.append(show)
+            }
+        }
+        return shows
     }
 
     public func search(keyword: String) async throws -> [OnlineShow] {
@@ -131,11 +153,15 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
 
     // MARK: - 解析（静态可单测）
 
-    /// 列表/详情响应 → OnlineShow
+    /// 列表/详情响应 → OnlineShow。
+    /// 只保留动漫类目（type_name 含 动漫/动画/番剧/剧场版），类目下误挂的解说/盘点标题剔除——
+    /// 真人电影/剧集/综艺/体育等由此排除（目录与搜索共用此过滤）
     static func shows(from data: Data, providerID: String) throws -> [OnlineShow] {
         let response = try decodeList(data)
         return response.list.compactMap { video in
             guard let vodID = video.vodID else { return nil }
+            guard Self.isAnimeCategoryName(video.typeName) else { return nil }
+            guard !Self.isJunkTitle(video.name) else { return nil }
             var subtitleParts: [String] = []
             if let typeName = video.typeName, !typeName.isEmpty { subtitleParts.append(typeName) }
             if let remarks = video.remarks, !remarks.isEmpty { subtitleParts.append(remarks) }
@@ -230,6 +256,8 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
         let pageCount: Int?
         let total: Int?
         let list: [MacCMSVideo]
+        /// 站点的分类树（ac=list 响应的 class 字段）
+        let categories: [MacCMSCategory]
     }
 
     struct MacCMSVideo: Sendable {
@@ -242,15 +270,56 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
         let playURL: String?
     }
 
+    struct MacCMSCategory: Sendable {
+        let typeID: String?
+        let typePID: String?
+        let typeName: String?
+    }
+
+    // MARK: - 动漫内容过滤（用户决策：只纳入动漫/动漫电影，真人电影/解说/体育等不进搜索与目录）
+
+    /// 纳入的类目关键词（含子类：日本动漫/国产动漫/动画电影/剧场版 等）
+    static let animeCategoryKeywords = ["动漫", "动画", "番剧", "剧场版"]
+    /// 类目命中但内容实为解说/盘点的标题特征（二次过滤）
+    static let junkTitleKeywords = ["解说", "速看", "几分钟", "盘点"]
+
+    static func isAnimeCategoryName(_ name: String?) -> Bool {
+        guard let name, !name.isEmpty else { return false }
+        return animeCategoryKeywords.contains { name.contains($0) }
+    }
+
+    static func isJunkTitle(_ title: String?) -> Bool {
+        guard let title, !title.isEmpty else { return false }
+        return junkTitleKeywords.contains { title.contains($0) }
+    }
+
+    /// 从分类树取动漫相关类目 id：自身命中，或父类目命中（如 动漫 → 日本动漫）
+    static func animeTypeIDs(from categories: [MacCMSCategory]) -> [String] {
+        let nameByID = Dictionary(
+            categories.compactMap { c in c.typeID.map { ($0, c.typeName ?? "") } },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return categories.compactMap { category in
+            guard let id = category.typeID else { return nil }
+            let parentName = category.typePID.flatMap { nameByID[$0] }
+            if isAnimeCategoryName(category.typeName) || isAnimeCategoryName(parentName) {
+                return id
+            }
+            return nil
+        }
+    }
+
     static func decodeList(_ data: Data) throws -> MacCMSListResponse {
         let root = try? JSONSerialization.jsonObject(with: data)
         guard let dict = root as? [String: Any] else { throw MacCMSError.badResponse }
         let rawList = dict["list"] as? [[String: Any]] ?? []
+        let rawClasses = dict["class"] as? [[String: Any]] ?? []
         return MacCMSListResponse(
             page: dict["page"] as? Int,
             pageCount: dict["pagecount"] as? Int,
             total: dict["total"] as? Int,
-            list: rawList.map(Self.video(from:))
+            list: rawList.map(Self.video(from:)),
+            categories: rawClasses.map(Self.category(from:))
         )
     }
 
@@ -263,6 +332,14 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
             typeName: dict["type_name"] as? String,
             playFrom: dict["vod_play_from"] as? String,
             playURL: dict["vod_play_url"] as? String
+        )
+    }
+
+    static func category(from dict: [String: Any]) -> MacCMSCategory {
+        MacCMSCategory(
+            typeID: scalarString(dict["type_id"]),
+            typePID: scalarString(dict["type_pid"]),
+            typeName: dict["type_name"] as? String
         )
     }
 

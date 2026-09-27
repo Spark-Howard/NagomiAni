@@ -34,6 +34,10 @@ struct PlayerView: View {
                         statusOverlay
                         VStack {
                             Spacer()
+                            // 连播征询条：95% 同步看完后弹出，点"看下一集"才切换
+                            if model.nextEpisodeOffer != nil {
+                                nextEpisodeBar
+                            }
                             controlsBar
                                 .opacity(bottomVisible ? 1 : 0)
                                 .allowsHitTesting(bottomVisible)
@@ -240,6 +244,45 @@ struct PlayerView: View {
         .padding(.top, 56)
     }
 
+    // MARK: - 连播征询条
+
+    private var nextEpisodeBar: some View {
+        HStack(spacing: 12) {
+            if let offer = model.nextEpisodeOffer {
+                Text("接下来：\(offer.label)")
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Button {
+                    model.acceptNextEpisode()
+                } label: {
+                    Text("看下一集")
+                        .font(.callout)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor, in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .help("切换到下一集")
+                Button {
+                    model.dismissNextEpisodeOffer()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .buttonStyle(.plain)
+                .help("本集内不再提示")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.bottom, 6)
+        .transition(.opacity)
+    }
+
     private var controlsBar: some View {
         VStack {
             Spacer()
@@ -284,7 +327,7 @@ struct PlayerView: View {
                 if model.routeCount > 1 {
                     routeMenu
                 }
-                // 自动连播开关（EOF 自动播下一集；番库/在线分集顺序）
+                // 连播提示开关（95% 同步看完后弹"看下一集"，点允许才切换）
                 Button {
                     model.autoPlayNextEnabled.toggle()
                 } label: {
@@ -294,7 +337,7 @@ struct PlayerView: View {
                         .foregroundStyle(model.autoPlayNextEnabled ? Color.accentColor : .white)
                 }
                 .buttonStyle(.plain)
-                .help(model.autoPlayNextEnabled ? "自动连播：开（点击关闭）" : "自动连播：关（点击开启）")
+                .help(model.autoPlayNextEnabled ? "看完提示连播：开（点击关闭）" : "看完提示连播：关（点击开启）")
                 Button {
                     toggleFullScreen()
                 } label: {

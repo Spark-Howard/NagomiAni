@@ -41,8 +41,8 @@ final class PlayerModel: ObservableObject {
     @Published var searchResults: [Subject] = []
     @Published var isSearching = false
 
-    // 自动连播
-    /// 播完自动播放下一集（番库/在线分集顺序；最后一集自动停）
+    // 自动连播（2026-09-27 由 EOF 自动切换改为征询式：95%/EOF 弹提示，点允许才换）
+    /// 接近播完时在屏幕下方弹"看下一集"提示；UserDefaults 键沿用旧开关
     @Published var autoPlayNextEnabled: Bool =
         UserDefaults.standard.object(forKey: "player.autoplayNext") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoPlayNextEnabled, forKey: Self.autoPlayNextKey) }
@@ -51,6 +51,18 @@ final class PlayerModel: ObservableObject {
     var nextEpisodeResolver: ((AutoNextContext) async -> OnlinePlayback?)?
     private var autoNextContext: AutoNextContext?
     private static let autoPlayNextKey = "player.autoplayNext"
+
+    /// 连播提示条（95% 或 EOF 时解析下一集后弹出；用户点"看下一集"才切换）
+    struct NextEpisodeOffer {
+        let playback: OnlinePlayback
+        var label: String { playback.displayTitle ?? "下一集" }
+    }
+    @Published private(set) var nextEpisodeOffer: NextEpisodeOffer?
+    /// 本集内用户点掉提示后不再弹（换集时重置）
+    private var nextOfferDismissed = false
+    /// 95% 触发器每集只触发一次（EOF 兜底二次触发）
+    private var nextOfferTriggered = false
+    private var isResolvingNextOffer = false
 
     // 多线路（在线源）
     /// 当前线路下标（0 起；单线路时无意义）
@@ -135,6 +147,10 @@ final class PlayerModel: ObservableObject {
             episodeNumber: currentMedia?.episodeNumber ?? 0,
             isOnline: mediaOverride != nil
         )
+        // 新的一集：重置连播提示状态
+        nextEpisodeOffer = nil
+        nextOfferDismissed = false
+        nextOfferTriggered = false
         // 在线片源与番库同样在来源页完成关联，顶部不再提示"关联条目"
         hideBindingBar = fromLibrary || mediaOverride != nil
         syncMessage = nil
@@ -236,8 +252,8 @@ final class PlayerModel: ObservableObject {
     private var markedWatchedKeys: Set<String> = []
     /// 最近一次跳转时间（阈值判定时忽略 seek 后短暂时间，防拖动误报）
     private var lastSeekTime: Date?
-    /// 看完判定：播放比例达到该值即算看完（不等 EOF）
-    private let watchedRatio: Double = 0.85
+    /// 看完判定：播放比例达到该值即算看完（不等 EOF）；2026-09-27 用户要求 95%
+    private let watchedRatio: Double = 0.95
     /// 阈值判定要求的最短时长（秒）：低于此不触发，防短视频/测试片误报
     private let watchedMinDuration: Double = 300
     /// seek 后忽略阈值判定的窗口（秒）
@@ -250,7 +266,7 @@ final class PlayerModel: ObservableObject {
         engine.seek(to: seconds, completion: nil)
     }
 
-    /// 播放中判定：自然播放到 85% 即标记看过（EOF 由 playbackEngineDidFinish 兜底）
+    /// 播放中判定：自然播放到 95% 即标记看过（EOF 由 playbackEngineDidFinish 兜底）
     private func checkAutoMarkWatched() {
         guard state == .playing, currentTime > 0, duration >= watchedMinDuration else { return }
         // seek/拖动后短时间内不判定，避免"拖到 90%"被误标
@@ -582,6 +598,8 @@ extension PlayerModel: PlaybackEngineDelegate {
         trackResumePosition(time)
         // 自然播放到阈值即标记看过（EOF 由 playbackEngineDidFinish 兜底）
         checkAutoMarkWatched()
+        // 接近尾声时弹"看下一集"提示（征询式连播）
+        checkNextEpisodeOffer()
     }
 
     func playbackEngine(_ engine: PlaybackEngine, didChangeState state: PlaybackState) {
@@ -603,8 +621,10 @@ extension PlayerModel: PlaybackEngineDelegate {
         // 播完：清续播记录，下次从头开始
         clearResume()
         autoSyncOnFinish()
-        // 自动连播：解析并加载下一集（解析不到 = 最后一集，自然停止）
-        Task { await playNextIfNeeded() }
+        // EOF 兜底：95% 没触发（短视频/跳过片尾）也弹"看下一集"提示
+        // （不再自动切换——用户点"允许"才换，2026-09-27 改为征询式）
+        nextOfferTriggered = true
+        Task { await offerNextEpisodeIfAvailable() }
     }
 
     /// 手动切换线路：保留当前播放位置重载（播放中途画质/速度差时用）
@@ -631,34 +651,62 @@ extension PlayerModel: PlaybackEngineDelegate {
         }
     }
 
-    private func playNextIfNeeded() async {
-        guard autoPlayNextEnabled,
-              let context = autoNextContext,
-              let resolver = nextEpisodeResolver else { return }
+    /// 播放中接近尾声（95%，与同步阈值一致）准备提示；每集只触发一次
+    private func checkNextEpisodeOffer() {
+        guard autoPlayNextEnabled, !nextOfferDismissed, nextEpisodeOffer == nil, !nextOfferTriggered else { return }
+        guard state == .playing, duration > 0, currentTime / duration >= watchedRatio else { return }
+        // seek/拖动后短时间内不触发，避免"拖到结尾"误弹
+        if let lastSeek = lastSeekTime, Date().timeIntervalSince(lastSeek) < seekIgnoreWindow { return }
+        nextOfferTriggered = true
+        Task { await offerNextEpisodeIfAvailable() }
+    }
+
+    /// 解析下一集并弹出提示；解析不到（最后一集）自然不弹
+    private func offerNextEpisodeIfAvailable() async {
+        guard autoPlayNextEnabled, !nextOfferDismissed, nextEpisodeOffer == nil, !isResolvingNextOffer else { return }
+        guard let context = autoNextContext, let resolver = nextEpisodeResolver else { return }
+        isResolvingNextOffer = true
+        defer { isResolvingNextOffer = false }
         guard let next = await resolver(context) else { return }
-        if next.isLocal {
-            await load(
-                url: next.url,
-                fromLibrary: true,
-                librarySubjectID: next.boundSubjectID,
-                librarySubject: next.boundSubject
-            )
-        } else {
-            await load(
-                url: next.url,
-                librarySubjectID: next.boundSubjectID,
-                librarySubject: next.boundSubject,
-                displayTitle: next.displayTitle,
-                resumeKey: next.resumeKey,
-                mediaOverride: MediaOverride(
-                    episodeNumber: next.episodeNumber,
-                    seriesKey: next.seriesKey
-                ),
-                httpHeaders: next.httpHeaders,
-                userAgent: next.userAgent,
-                routes: next.routes
-            )
+        nextEpisodeOffer = NextEpisodeOffer(playback: next)
+    }
+
+    /// 用户点"看下一集"：切换（与点播同一链路，绑定/续播/同步全部生效）
+    func acceptNextEpisode() {
+        guard let offer = nextEpisodeOffer else { return }
+        nextEpisodeOffer = nil
+        let next = offer.playback
+        Task {
+            if next.isLocal {
+                await load(
+                    url: next.url,
+                    fromLibrary: true,
+                    librarySubjectID: next.boundSubjectID,
+                    librarySubject: next.boundSubject
+                )
+            } else {
+                await load(
+                    url: next.url,
+                    librarySubjectID: next.boundSubjectID,
+                    librarySubject: next.boundSubject,
+                    displayTitle: next.displayTitle,
+                    resumeKey: next.resumeKey,
+                    mediaOverride: MediaOverride(
+                        episodeNumber: next.episodeNumber,
+                        seriesKey: next.seriesKey
+                    ),
+                    httpHeaders: next.httpHeaders,
+                    userAgent: next.userAgent,
+                    routes: next.routes
+                )
+            }
         }
+    }
+
+    /// 用户点 ×：本集内不再弹（换集重置）
+    func dismissNextEpisodeOffer() {
+        nextEpisodeOffer = nil
+        nextOfferDismissed = true
     }
 
     func playbackEngine(_ engine: PlaybackEngine, didFailWith error: Error) {}

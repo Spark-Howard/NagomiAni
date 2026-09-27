@@ -9,10 +9,13 @@ struct OnlinePage: View {
 
     @State private var expandedShows: Set<String> = []
     @State private var preparingEpisodeID: String?
+    @State private var showSourceSheet = false
+    @State private var searchKeyword = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            searchBar
             content
             if let message = model.statusMessage {
                 Text(message)
@@ -26,6 +29,9 @@ struct OnlinePage: View {
         .task {
             await model.loadShowsIfNeeded()
             model.refreshCacheState()
+        }
+        .sheet(isPresented: $showSourceSheet) {
+            OnlineSourceSheet(model: model)
         }
         .sheet(
             isPresented: Binding(
@@ -54,11 +60,45 @@ struct OnlinePage: View {
             }
             .controlSize(.small)
             .disabled(model.cacheTotalBytes == 0)
+            Button {
+                showSourceSheet = true
+            } label: {
+                Label("添加片源", systemImage: "plus.circle")
+            }
+            .controlSize(.small)
             if model.isPreparing || model.isLoadingShows {
                 ProgressView()
                     .controlSize(.small)
             }
         }
+    }
+
+    /// 跨站搜索（苹果CMS 资源站 + 样例源）
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            TextField("搜索片源（资源站关键词）", text: $searchKeyword)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { searchOnline() }
+            Button("搜索") {
+                searchOnline()
+            }
+            .disabled(searchKeyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearchingOnline)
+            if model.isSearchingOnline {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            if model.onlineSearchResults != nil {
+                Button("返回目录") {
+                    model.clearOnlineSearch()
+                    searchKeyword = ""
+                }
+            }
+        }
+    }
+
+    private func searchOnline() {
+        let keyword = searchKeyword
+        Task { await model.searchOnline(keyword) }
     }
 
     @ViewBuilder
@@ -75,7 +115,9 @@ struct OnlinePage: View {
             Image(systemName: "play.tv")
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
-            Text(model.isLoadingShows ? "正在加载片源…" : "暂无在线片源\n接入站点后会在这里显示剧集")
+            Text(model.isLoadingShows
+                 ? "正在加载片源…"
+                 : "点「添加片源」粘贴苹果CMS 资源站地址\n或先用内置样例番组体验完整链路")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
@@ -85,11 +127,16 @@ struct OnlinePage: View {
     private var showList: some View {
         ScrollView {
             LazyVStack(spacing: 6) {
-                ForEach(model.shows) { show in
+                ForEach(list) { show in
                     showRow(show)
                 }
             }
         }
+    }
+
+    /// 搜索结果优先，否则浏览默认目录
+    private var list: [OnlineShow] {
+        model.onlineSearchResults ?? model.shows
     }
 
     private func showRow(_ show: OnlineShow) -> some View {
@@ -124,6 +171,12 @@ struct OnlinePage: View {
                             Text(subtitle)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        }
+                        if show.providerID != "mock", let siteName = model.providerName(for: show) {
+                            Text(siteName)
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .lineLimit(1)
                         }
                     }
                 }
@@ -324,6 +377,84 @@ struct OnlinePage: View {
                 }
             }
         )
+    }
+}
+
+/// 「添加片源」sheet：粘贴苹果CMS 资源站地址（首页或完整 API 地址均可），可管理已添加站点
+struct OnlineSourceSheet: View {
+    @ObservedObject var model: OnlineStore
+    @State private var urlText = ""
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("添加片源（苹果CMS V10 资源站）")
+                .font(.headline)
+
+            HStack {
+                TextField("https://example.com（站点地址或 API 地址）", text: $urlText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { add() }
+                Button("添加") { add() }
+                    .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+
+            Divider()
+
+            if model.sites.isEmpty {
+                Text("尚未添加资源站。粘贴站点首页地址即可，会自动拼接采集接口路径 /api.php/provide/vod/")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("已添加 \(model.sites.count) 个站点")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                List {
+                    ForEach(model.sites, id: \.self) { site in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(URL(string: site)?.host ?? site)
+                                    .font(.body)
+                                Text(site)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            Button {
+                                model.removeSite(site)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .help("移除该站点")
+                        }
+                    }
+                }
+                .listStyle(.inset)
+            }
+
+            Spacer()
+
+            Text("说明：支持苹果CMS V10 采集接口（/api.php/provide/vod/）。仓库不内置任何站点，请自行添加并遵守站点条款；播放行为等同直接打开视频地址。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("完成") { dismiss() }
+            }
+        }
+        .padding(16)
+        .frame(width: 460, height: 420)
+    }
+
+    private func add() {
+        let text = urlText
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        model.addSite(text)
+        urlText = ""
     }
 }
 

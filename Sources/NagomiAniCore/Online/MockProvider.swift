@@ -48,6 +48,10 @@ public final class MockProvider: SourceProvider, @unchecked Sendable {
         )]
     }
 
+    public func search(keyword: String) async throws -> [OnlineShow] {
+        try await listShows().filter { $0.title.localizedCaseInsensitiveContains(keyword) }
+    }
+
     public func episodes(for showID: String) async throws -> [OnlineEpisode] {
         guard showID == Self.sampleShowID else { return [] }
         return (1...Self.episodeCount).map { number in

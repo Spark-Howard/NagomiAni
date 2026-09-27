@@ -15,8 +15,10 @@ struct OnlinePlayback {
     let boundSubject: Subject?
 }
 
-/// 在线片源页的状态模型：汇总各 Provider 的目录，组装点播参数；
-/// Bangumi 绑定与已看徽章（与 PlayerModel 共用同一张 UserDefaults 绑定表）。
+/// 在线片源页的状态模型：
+/// - 汇总各 Provider 的目录与跨站搜索，组装点播参数
+/// - Bangumi 绑定与已看徽章（与 PlayerModel 共用同一张 UserDefaults 绑定表）
+/// - 苹果CMS 资源站管理（仓库不内置任何站点，用户自行添加/移除）
 @MainActor
 final class OnlineStore: ObservableObject {
     @Published private(set) var shows: [OnlineShow] = []
@@ -25,6 +27,102 @@ final class OnlineStore: ObservableObject {
     @Published var statusMessage: String?
     @Published private(set) var isLoadingShows = false
     @Published private(set) var isPreparing = false
+
+    private(set) var providers: [SourceProvider] = []
+    private var showsLoaded = false
+
+    // MARK: - 资源站管理与跨站搜索
+
+    static let sitesKey = "online.maccms.sites"
+    /// 已添加的苹果CMS 资源站（归一化 API 地址，UserDefaults 持久化；仓库不内置任何站点）
+    @Published private(set) var sites: [String] = []
+    /// 非 nil 时列表切换为搜索结果（nil = 浏览默认目录）
+    @Published private(set) var onlineSearchResults: [OnlineShow]?
+    @Published private(set) var isSearchingOnline = false
+    private var searchGeneration = 0
+
+    init() {
+        sites = UserDefaults.standard.stringArray(forKey: Self.sitesKey) ?? []
+        rebuildProviders()
+    }
+
+    /// Mock 样例源永远保留（全链路演示/兜底），后接用户添加的资源站
+    private func rebuildProviders() {
+        var list: [SourceProvider] = [MockProvider()]
+        for site in sites {
+            if let provider = MacCMSProvider(base: site) {
+                list.append(provider)
+            }
+        }
+        providers = list
+    }
+
+    func addSite(_ raw: String) {
+        guard let provider = MacCMSProvider(base: raw) else {
+            statusMessage = "无法识别的站点地址：\(raw)"
+            return
+        }
+        let normalized = provider.apiBase.absoluteString
+        if sites.contains(normalized) {
+            statusMessage = "该站点已添加：\(provider.displayName)"
+            return
+        }
+        sites.append(normalized)
+        UserDefaults.standard.set(sites, forKey: Self.sitesKey)
+        rebuildProviders()
+        statusMessage = "已添加片源：\(provider.displayName)"
+        Task { await reloadShows() }
+    }
+
+    func removeSite(_ raw: String) {
+        sites.removeAll { $0 == raw }
+        UserDefaults.standard.set(sites, forKey: Self.sitesKey)
+        rebuildProviders()
+        statusMessage = "已移除片源"
+        Task { await reloadShows() }
+    }
+
+    private func reloadShows() async {
+        showsLoaded = false
+        onlineSearchResults = nil
+        await loadShowsIfNeeded()
+    }
+
+    /// 跨站搜索：扇出到各 Provider（代际守卫防慢站结果覆盖新搜索）
+    func searchOnline(_ keyword: String) async {
+        let trimmed = keyword.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            onlineSearchResults = nil
+            return
+        }
+        isSearchingOnline = true
+        defer { isSearchingOnline = false }
+        searchGeneration += 1
+        let generation = searchGeneration
+        var results: [OnlineShow] = []
+        for provider in providers {
+            do {
+                let found = try await provider.search(keyword: trimmed)
+                guard generation == searchGeneration else { return } // 已被新搜索取代
+                results.append(contentsOf: found)
+                onlineSearchResults = results
+            } catch {
+                statusMessage = "\(provider.displayName) 搜索失败：\(error.localizedDescription)"
+            }
+        }
+        if generation == searchGeneration, results.isEmpty {
+            statusMessage = "没有找到「\(trimmed)」相关内容"
+        }
+    }
+
+    func clearOnlineSearch() {
+        searchGeneration += 1
+        onlineSearchResults = nil
+    }
+
+    func providerName(for show: OnlineShow) -> String? {
+        provider(id: show.providerID)?.displayName
+    }
 
     // MARK: - Bangumi 绑定与已看徽章
     /// 合成 seriesKey（"online:<provider>:<showID>"）直通 PlayerModel 的 markWatched 自动同步
@@ -38,92 +136,8 @@ final class OnlineStore: ObservableObject {
     /// 当前绑定 sheet 的目标番（nil = 关闭）
     @Published var bindTarget: OnlineShow?
 
-    private let providers: [SourceProvider]
-    private var showsLoaded = false
-
-    // MARK: - 本地缓存（StreamCache：HLS 分片 / 单文件）
-    private let cache = StreamCache()
-    /// 已完整缓存的 resumeKey 集合
-    @Published private(set) var cachedKeys: Set<String> = []
-    /// 下载中的 resumeKey → 进度（含字节级：已下载/总大小，总大小可能未知）
-    @Published private(set) var cacheProgress: [String: StreamCache.Progress] = [:]
-    /// 已缓存条目的磁盘占用（resumeKey → 字节）
-    @Published private(set) var cacheSizes: [String: Int64] = [:]
-    /// 缓存总字节数
-    @Published private(set) var cacheTotalBytes: Int64 = 0
-    private var cacheTasks: [String: Task<Void, Never>] = [:]
-
-    init(providers: [SourceProvider] = [MockProvider()]) {
-        self.providers = providers
-    }
-
-    // MARK: - 目录
-
-    func loadShowsIfNeeded() async {
-        guard !showsLoaded, !isLoadingShows else { return }
-        isLoadingShows = true
-        defer { isLoadingShows = false }
-        var all: [OnlineShow] = []
-        for provider in providers {
-            do {
-                all.append(contentsOf: try await provider.listShows())
-            } catch {
-                statusMessage = "\(provider.displayName) 加载失败：\(error.localizedDescription)"
-            }
-        }
-        shows = all
-        showsLoaded = true
-    }
-
-    /// 展开番条目/行出现时加载集列表（幂等）
-    func ensureEpisodes(for show: OnlineShow) async {
-        guard episodes[show.id] == nil else { return }
-        guard let provider = provider(id: show.providerID) else { return }
-        do {
-            episodes[show.id] = try await provider.episodes(for: show.showID)
-        } catch {
-            episodes[show.id] = []
-            statusMessage = "\(provider.displayName) 集列表加载失败：\(error.localizedDescription)"
-        }
-    }
-
-    // MARK: - 点播
-
-    /// 取流 URL 并组装播放参数（mock 首次播放要生成样例视频，可能耗时几十秒）。
-    /// 已绑定的番会带上 Bangumi 条目，PlayerModel 经 bindLocal 复用绑定保证播完自动同步。
-    func preparePlayback(show: OnlineShow, episode: OnlineEpisode) async throws -> OnlinePlayback {
-        guard let provider = provider(id: episode.providerID) else {
-            throw OnlineStoreError.unknownProvider
-        }
-        isPreparing = true
-        defer { isPreparing = false }
-        statusMessage = "正在准备「\(show.title) 第 \(episode.number) 集」的片源…"
-        let source = try await provider.streamURL(for: episode)
-        statusMessage = nil
-        // 已整体缓存的集直接播本地副本（HLS 为重写的本地 playlist）
-        let playURL = cache.cachedMediaURL(for: episode.resumeKey) ?? source.url
-        let boundID = binding(for: episode.seriesKey)
-        return OnlinePlayback(
-            url: playURL,
-            displayTitle: Self.displayTitle(show: show, episode: episode),
-            seriesKey: episode.seriesKey,
-            episodeNumber: episode.number,
-            resumeKey: episode.resumeKey,
-            httpHeaders: source.httpHeaders,
-            userAgent: source.userAgent,
-            boundSubjectID: boundID,
-            boundSubject: boundID.flatMap { subjects[$0] }
-        )
-    }
-
-    // MARK: - 绑定（UserDefaults 与 PlayerModel 同一张表）
-
     func binding(for seriesKey: String) -> Int? {
         (UserDefaults.standard.dictionary(forKey: PlayerModel.bindingsKey) as? [String: Int])?[seriesKey]
-    }
-
-    private func boundName(for seriesKey: String) -> String? {
-        (UserDefaults.standard.dictionary(forKey: PlayerModel.boundNamesKey) as? [String: String])?[seriesKey]
     }
 
     func bind(subject: Subject, to show: OnlineShow) {
@@ -152,8 +166,7 @@ final class OnlineStore: ObservableObject {
         statusMessage = "已解除关联"
     }
 
-    // MARK: - 搜索（绑定 sheet 用）
-
+    /// 绑定 sheet 的 Bangumi 条目搜索
     func search(keyword: String) async {
         guard let client = await BangumiSession.makeClient() else {
             statusMessage = "未登录 Bangumi，无法搜索（请先在「聊天」页登录）"
@@ -168,8 +181,6 @@ final class OnlineStore: ObservableObject {
             statusMessage = "搜索失败：\(error.localizedDescription)"
         }
     }
-
-    // MARK: - 已看徽章与条目展示
 
     /// 已关联条目的封面/名称（未缓存时静默补拉）
     func ensureSubject(for show: OnlineShow) async {
@@ -205,7 +216,86 @@ final class OnlineStore: ObservableObject {
         watchedEpisodes[episode.seriesKey]?.contains(episode.number) == true
     }
 
-    // MARK: - 缓存
+    // MARK: - 目录
+
+    func loadShowsIfNeeded() async {
+        guard !showsLoaded, !isLoadingShows else { return }
+        isLoadingShows = true
+        defer { isLoadingShows = false }
+        var all: [OnlineShow] = []
+        for provider in providers {
+            do {
+                all.append(contentsOf: try await provider.listShows())
+            } catch {
+                statusMessage = "\(provider.displayName) 加载失败：\(error.localizedDescription)"
+            }
+        }
+        shows = all
+        showsLoaded = true
+    }
+
+    /// 展开番条目/行出现时加载集列表（幂等）
+    func ensureEpisodes(for show: OnlineShow) async {
+        guard episodes[show.id] == nil else { return }
+        guard let provider = provider(id: show.providerID) else { return }
+        do {
+            episodes[show.id] = try await provider.episodes(for: show.showID)
+        } catch {
+            episodes[show.id] = []
+            statusMessage = "\(provider.displayName) 集列表加载失败：\(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - 点播
+
+    /// 取流 URL 并组装播放参数。已绑定的番带上 Bangumi 条目，
+    /// PlayerModel 经 bindLocal 复用绑定保证播完自动同步。
+    func preparePlayback(show: OnlineShow, episode: OnlineEpisode) async throws -> OnlinePlayback {
+        guard let provider = provider(id: episode.providerID) else {
+            throw OnlineStoreError.unknownProvider
+        }
+        isPreparing = true
+        defer { isPreparing = false }
+        statusMessage = "正在准备「\(show.title) 第 \(episode.number) 集」的片源…"
+        let source = try await provider.streamURL(for: episode)
+        statusMessage = nil
+        // 已整体缓存的集直接播本地副本（HLS 为重写的本地 playlist）
+        let playURL = cache.cachedMediaURL(for: episode.resumeKey) ?? source.url
+        let boundID = binding(for: episode.seriesKey)
+        return OnlinePlayback(
+            url: playURL,
+            displayTitle: Self.displayTitle(show: show, episode: episode),
+            seriesKey: episode.seriesKey,
+            episodeNumber: episode.number,
+            resumeKey: episode.resumeKey,
+            httpHeaders: source.httpHeaders,
+            userAgent: source.userAgent,
+            boundSubjectID: boundID,
+            boundSubject: boundID.flatMap { subjects[$0] }
+        )
+    }
+
+    private func provider(id: String) -> SourceProvider? {
+        providers.first { $0.id == id }
+    }
+
+    /// 播放器顶部/窗口标题统一显示的标题
+    static func displayTitle(show: OnlineShow, episode: OnlineEpisode) -> String {
+        "\(show.title) · 第 \(episode.number) 集"
+    }
+
+    // MARK: - 本地缓存（StreamCache：HLS 分片 / 单文件）
+
+    private let cache = StreamCache()
+    /// 已完整缓存的 resumeKey 集合
+    @Published private(set) var cachedKeys: Set<String> = []
+    /// 下载中的 resumeKey → 进度（含字节级：已下载/总大小，总大小可能未知）
+    @Published private(set) var cacheProgress: [String: StreamCache.Progress] = [:]
+    /// 已缓存条目的磁盘占用（resumeKey → 字节）
+    @Published private(set) var cacheSizes: [String: Int64] = [:]
+    /// 缓存总字节数
+    @Published private(set) var cacheTotalBytes: Int64 = 0
+    private var cacheTasks: [String: Task<Void, Never>] = [:]
 
     enum CacheState: Equatable {
         case notCached
@@ -252,17 +342,18 @@ final class OnlineStore: ObservableObject {
             defer { cacheTasks[key] = nil }
             do {
                 let source = try await provider.streamURL(for: episode)
+                let progressHandler: @Sendable (StreamCache.Progress) -> Void = { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        self?.cacheProgress[key] = progress
+                    }
+                }
                 if source.isHLS {
                     _ = try await cache.download(
                         playlistURL: source.url,
                         httpHeaders: source.httpHeaders,
                         userAgent: source.userAgent,
                         cacheKey: key,
-                        progress: { [weak self] progress in
-                            Task { @MainActor [weak self] in
-                                self?.cacheProgress[key] = progress
-                            }
-                        }
+                        progress: progressHandler
                     )
                 } else {
                     _ = try await cache.downloadFile(
@@ -270,11 +361,7 @@ final class OnlineStore: ObservableObject {
                         httpHeaders: source.httpHeaders,
                         userAgent: source.userAgent,
                         cacheKey: key,
-                        progress: { [weak self] progress in
-                            Task { @MainActor [weak self] in
-                                self?.cacheProgress[key] = progress
-                            }
-                        }
+                        progress: progressHandler
                     )
                 }
                 cachedKeys.insert(key)
@@ -324,15 +411,6 @@ final class OnlineStore: ObservableObject {
             return "\(downloaded) / \(formattedBytes(total))"
         }
         return downloaded
-    }
-
-    private func provider(id: String) -> SourceProvider? {
-        providers.first { $0.id == id }
-    }
-
-    /// 播放器顶部/窗口标题统一显示的标题
-    static func displayTitle(show: OnlineShow, episode: OnlineEpisode) -> String {
-        "\(show.title) · 第 \(episode.number) 集"
     }
 }
 

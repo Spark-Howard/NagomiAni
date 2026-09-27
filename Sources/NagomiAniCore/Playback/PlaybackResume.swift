@@ -72,6 +72,20 @@ public final class PlaybackResumeStore: @unchecked Sendable {
         return entries[path]
     }
 
+    public struct SnapshotItem: Sendable {
+        public let key: String
+        public let entry: PlaybackResumeEntry
+    }
+
+    /// 全部记录按更新时间降序（供"继续观看"等聚合视图使用）
+    public func snapshot() -> [SnapshotItem] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries
+            .map { SnapshotItem(key: $0.key, entry: $0.value) }
+            .sorted { $0.entry.updatedAt > $1.entry.updatedAt }
+    }
+
     public func update(path: String, position: Double, duration: Double, updatedAt: Date = Date()) {
         lock.lock()
         entries[path] = PlaybackResumeEntry(position: position, duration: duration, updatedAt: updatedAt)

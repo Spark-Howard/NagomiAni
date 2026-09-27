@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import NagomiAniCore
 
 struct ContentView: View {
     @StateObject private var model = PlayerModel()
@@ -17,6 +18,8 @@ struct ContentView: View {
     @State private var isFullScreen = false
     /// 已经访问过的页面：只挂载访问过的，之后不再销毁重建
     @State private var visited: Set<SidebarItem> = [.player]
+    /// 继续观看区块的刷新标记（切页时 +1，番库页据此重算卡片）
+    @State private var continueWatchingRevision = 0
 
     var body: some View {
         HStack(spacing: 0) {
@@ -57,6 +60,7 @@ struct ContentView: View {
             if newValue != .player {
                 model.pauseForHiddenUI()
             }
+            continueWatchingRevision += 1
         }
         .onChange(of: account.isLoggedIn) { loggedIn in
             // 统一登录完成后（无论从收藏页还是聊天页发起）：回到发起页并清空待处理目标
@@ -98,6 +102,46 @@ struct ContentView: View {
             title = "NagomiAni"
         }
         NSApp.windows.first(where: { $0.isVisible })?.title = title
+    }
+
+    /// 继续观看卡片：resume.json 最近的可续播记录映射为本地/云端混排条目
+    private func continueWatchingItems() -> [ContinueWatchingItem] {
+        model.recentResumes(limit: 12).compactMap { item -> ContinueWatchingItem? in
+            let progress = item.duration > 0 ? min(item.position / item.duration, 1) : 0
+            if item.key.hasPrefix("online:") {
+                // 合成键 "online:provider:showID:number" → 番库收藏里的云端番
+                let parts = item.key.dropFirst("online:".count).split(separator: ":").map(String.init)
+                guard parts.count == 3, let number = Int(parts[2]),
+                      let entry = online.libraryEntries.first(where: {
+                          $0.providerID == parts[0] && $0.showID == parts[1]
+                      }) else { return nil }
+                let show = entry.asShow
+                let episode = OnlineEpisode(providerID: show.providerID, showID: show.showID, number: number)
+                return ContinueWatchingItem(
+                    id: item.key,
+                    title: entry.title,
+                    subtitle: "第 \(number) 集 · 云端",
+                    progress: progress,
+                    updatedAt: item.updatedAt,
+                    action: .cloud(show: show, episode: episode)
+                )
+            }
+            // 本地文件路径 → 番库系列
+            let url = URL(fileURLWithPath: item.key)
+            guard let series = library.series.first(where: { $0.files.contains { $0.path == url.path } }) else {
+                return nil
+            }
+            let file = series.files.first { $0.path == url.path }
+            let subtitle = file?.episodeNumber.map { "第 \($0) 集" } ?? url.lastPathComponent
+            return ContinueWatchingItem(
+                id: item.key,
+                title: series.displayName,
+                subtitle: subtitle + " · 本地",
+                progress: progress,
+                updatedAt: item.updatedAt,
+                action: .local(url)
+            )
+        }
     }
 
     /// 全屏样式改动延后到下一 runloop 再执行。
@@ -162,7 +206,12 @@ struct ContentView: View {
     private func page(for item: SidebarItem) -> some View {
         switch item {
         case .library:
-            LibraryPage(model: library, online: online) { url in
+            LibraryPage(
+                model: library,
+                online: online,
+                continueWatchingProvider: { continueWatchingItems() },
+                continueWatchingRevision: continueWatchingRevision,
+                onPlay: { url in
                 // 防御：索引残留了磁盘上已不存在的文件（正常应在"更新"重扫时清掉）——
                 // 不再切播放页尝试播放，而是触发该目录重扫并把失效条目清掉
                 guard FileManager.default.fileExists(atPath: url.path) else {
@@ -184,7 +233,8 @@ struct ContentView: View {
                         librarySubject: series.flatMap { library.cover(for: $0) }
                     )
                 }
-            } onPlayOnline: { playback in
+                },
+                onPlayOnline: { playback in
                 // 从番库点播云端剧集：经对应片源取流后加载（绑定/续播/自动同步与在线页同链路）
                 selection = .player
                 Task {
@@ -202,7 +252,8 @@ struct ContentView: View {
                         userAgent: playback.userAgent
                     )
                 }
-            }
+                }
+            )
         case .bangumi:
             BangumiPage(model: account) {
                 startUnifiedLogin(returnTo: .bangumi)

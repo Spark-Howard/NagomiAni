@@ -282,6 +282,26 @@ final class PlayerModel: ObservableObject {
         pendingResumeTarget = nil
     }
 
+    // MARK: - 继续观看（聚合入口用）
+
+    struct ResumeItem {
+        let key: String
+        let position: Double
+        let duration: Double
+        let updatedAt: Date
+    }
+
+    /// 最近的可续播记录（按更新时间降序；已看完/开头几分钟的记录不算）
+    func recentResumes(limit: Int) -> [ResumeItem] {
+        resumeStore.snapshot().prefix(limit).compactMap { item in
+            guard ResumePolicy.resumePosition(position: item.entry.position, duration: item.entry.duration) != nil else {
+                return nil // 看完的/几乎没看的没有"继续"意义
+            }
+            return ResumeItem(key: item.key, position: item.entry.position,
+                              duration: item.entry.duration, updatedAt: item.entry.updatedAt)
+        }
+    }
+
     // MARK: - 音轨 / 字幕
 
     func selectAudioTrack(_ index: Int) {

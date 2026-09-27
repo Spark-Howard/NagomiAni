@@ -1,17 +1,37 @@
 import SwiftUI
 import NagomiAniCore
 
+/// 继续观看卡片（本地/云端混排，数据来自 resume.json 最近的可续播记录）
+struct ContinueWatchingItem: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let progress: Double
+    let updatedAt: Date
+    let action: Action
+
+    enum Action {
+        case local(URL)
+        case cloud(show: OnlineShow, episode: OnlineEpisode)
+    }
+}
+
 /// 番库页（侧边栏第三页）：本地番与云端番（在线页加入的剧集）并列展示
 struct LibraryPage: View {
     @ObservedObject var model: LibraryViewModel
     /// 在线片源（云端番库条目、分集列表、Bangumi 绑定与已看状态都从这里取）
     @ObservedObject var online: OnlineStore
+    /// 继续观看卡片数据源（ContentView 组装：本地路径/云端键都映射回番库）
+    var continueWatchingProvider: () -> [ContinueWatchingItem] = { [] }
+    /// 数据源刷新标记（切页时递增）
+    var continueWatchingRevision: Int = 0
     /// 点击本地某一集时回调（由外层切换到播放器页并加载文件）
     var onPlay: (URL) -> Void
     /// 点击云端某一集时回调（已完成取流的播放参数，与在线页同链路）
     var onPlayOnline: (OnlinePlayback) -> Void
     @State private var hoveredFilePath: String?
     @State private var expandedCloud: Set<String> = []
+    @State private var continueWatching: [ContinueWatchingItem] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -31,6 +51,9 @@ struct LibraryPage: View {
         .padding(20)
         .frame(minWidth: 520, minHeight: 480)
         .navigationTitle("番库")
+        .task(id: continueWatchingRevision) {
+            continueWatching = continueWatchingProvider()
+        }
         .sheet(
             isPresented: Binding(
                 get: { model.bindTarget != nil },
@@ -102,6 +125,17 @@ struct LibraryPage: View {
     private var seriesList: some View {
         ScrollView {
             LazyVStack(spacing: 6) {
+                if !continueWatching.isEmpty {
+                    sectionHeader("继续观看", systemImage: "clock.arrow.circlepath")
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 10) {
+                            ForEach(continueWatching) { item in
+                                continueCard(item)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
                 if !model.series.isEmpty {
                     sectionHeader("本地番库", systemImage: "internaldrive")
                     ForEach(model.series) { series in
@@ -140,6 +174,44 @@ struct LibraryPage: View {
     }
 
     // MARK: - 云端番库（在线页加入的剧集）
+
+    /// 继续观看卡片：点击本地走本地加载、云端经片源取流，续播位置由 resume.json 自动恢复
+    private func continueCard(_ item: ContinueWatchingItem) -> some View {
+        Button {
+            switch item.action {
+            case .local(let url):
+                onPlay(url)
+            case .cloud(let show, let episode):
+                playCloud(show: show, episode: episode)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(item.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(item.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                ProgressView(value: item.progress)
+                    .progressViewStyle(.linear)
+                HStack {
+                    Text("\(Int((item.progress * 100).rounded()))%")
+                    Spacer()
+                    Text(item.updatedAt, style: .relative)
+                }
+                .font(.caption2)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .frame(width: 210, alignment: .leading)
+            .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+    }
 
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
         HStack(spacing: 6) {

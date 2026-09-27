@@ -3,6 +3,13 @@ import Foundation
 import UniformTypeIdentifiers
 import NagomiAniCore
 
+/// 在线片源的媒体信息覆盖：没有文件名可解析，集号与合成 seriesKey 由片源直接给出。
+/// 携带它即视为"在线打开"（复用番库的隐藏关联栏/复用绑定行为）。
+struct MediaOverride: Equatable {
+    let episodeNumber: Int?
+    let seriesKey: String
+}
+
 /// 播放器的 UI 状态模型：桥接 PlaybackEngine 与 SwiftUI
 final class PlayerModel: ObservableObject {
     @Published private(set) var state: PlaybackState = .idle
@@ -75,30 +82,44 @@ final class PlayerModel: ObservableObject {
         url: URL,
         fromLibrary: Bool = false,
         librarySubjectID: Int? = nil,
-        librarySubject: Subject? = nil
+        librarySubject: Subject? = nil,
+        displayTitle: String? = nil,
+        resumeKey: String? = nil,
+        mediaOverride: MediaOverride? = nil,
+        httpHeaders: [String: String] = [:],
+        userAgent: String? = nil
     ) async {
         // 换文件前先把上一个文件的位置落盘
         flushResume(force: true)
-        fileName = url.lastPathComponent
-        currentMedia = MediaMatching.parse(fileName: url.lastPathComponent)
-        hideBindingBar = fromLibrary
+        // 在线片源没有文件名可解析，标题与集号/系列键由片源直接给出
+        fileName = displayTitle ?? url.lastPathComponent
+        if let override = mediaOverride {
+            currentMedia = (episodeNumber: override.episodeNumber, seriesKey: override.seriesKey)
+        } else {
+            currentMedia = MediaMatching.parse(fileName: url.lastPathComponent)
+        }
+        // 在线片源与番库同样在来源页完成关联，顶部不再提示"关联条目"
+        hideBindingBar = fromLibrary || mediaOverride != nil
         syncMessage = nil
-        if fromLibrary, let id = librarySubjectID {
-            // 从番库打开：该目录已在番库中关联，直接复用绑定（保证播完自动同步生效），
-            // 顶部不再提示"关联条目"
+        if (fromLibrary || mediaOverride != nil), let id = librarySubjectID {
+            // 从番库/在线页打开：该内容已关联，直接复用绑定（保证播完自动同步生效）
             bindLocal(subjectID: id, subject: librarySubject)
         } else {
             restoreBinding()
         }
-        // 断点续播：查上次位置，值得跳转则从该处开始（番库/Cmd+O/拖拽统一生效）
-        let path = url.standardizedFileURL.path
-        let resumeAt = resumeStore.entry(forPath: path)
+        // 断点续播：键默认取文件路径；在线源用稳定合成键（"online:provider:show:ep"，跨会话不变）
+        let resumePath = resumeKey ?? url.standardizedFileURL.path
+        let resumeAt = resumeStore.entry(forPath: resumePath)
             .flatMap { ResumePolicy.resumePosition(position: $0.position, duration: $0.duration) }
-        pendingResume = (path: path, position: resumeAt ?? 0, duration: 0)
+        pendingResume = (path: resumePath, position: resumeAt ?? 0, duration: 0)
         pendingResumeTarget = resumeAt
         lastResumeSaveAt = Date()
         do {
-            try await engine.load(url: url, options: PlaybackOptions(startTime: resumeAt ?? 0))
+            try await engine.load(url: url, options: PlaybackOptions(
+                startTime: resumeAt ?? 0,
+                httpHeaders: httpHeaders,
+                userAgent: userAgent
+            ))
             if let resumeAt {
                 syncMessage = "已从 \(Self.format(resumeAt)) 继续播放"
             }

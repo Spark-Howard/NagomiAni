@@ -5,10 +5,21 @@ import Foundation
 public struct PlaybackOptions: Sendable {
     public var startTime: Double
     public var autoplay: Bool
+    /// 附加 HTTP 请求头（在线流用，如 Referer/Cookie；本地文件忽略）
+    public var httpHeaders: [String: String]
+    /// 覆盖 User-Agent（nil 不设置）
+    public var userAgent: String?
 
-    public init(startTime: Double = 0, autoplay: Bool = true) {
+    public init(
+        startTime: Double = 0,
+        autoplay: Bool = true,
+        httpHeaders: [String: String] = [:],
+        userAgent: String? = nil
+    ) {
         self.startTime = startTime
         self.autoplay = autoplay
+        self.httpHeaders = httpHeaders
+        self.userAgent = userAgent
     }
 }
 

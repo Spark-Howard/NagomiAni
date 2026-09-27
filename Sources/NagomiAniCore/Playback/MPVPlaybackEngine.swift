@@ -112,7 +112,24 @@ public final class MPVPlaybackEngine: PlaybackEngine {
             // loadfile 在后台线程执行：mpv_command 会阻塞到命令完成，
             // 若在主线程调用，切页/加载大文件时 UI 会卡死（转圈定格）
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let status = self?.runCommand(["loadfile", url.path, "replace"]) ?? -1
+                guard let self else { return }
+                // 网络流参数：每次 load 显式设置/复位，避免上一个网络文件的头串味到下一个
+                if let handle = self.mpvHandle {
+                    if options.httpHeaders.isEmpty {
+                        mpv_set_property_string(handle, "http-header-fields", "")
+                    } else {
+                        // mpv 列表属性按逗号分隔；头值含逗号的场景暂不存在（mock/常见站点均无）
+                        let joined = options.httpHeaders
+                            .map { "\($0.key): \($0.value)" }
+                            .sorted()
+                            .joined(separator: ",")
+                        mpv_set_property_string(handle, "http-header-fields", joined)
+                    }
+                    mpv_set_property_string(handle, "user-agent", options.userAgent ?? "")
+                }
+                // http(s) URL 必须用 absoluteString：url.path 会丢掉 query（如带 token 的流地址）
+                let target = url.isFileURL ? url.path : url.absoluteString
+                let status = self.runCommand(["loadfile", target, "replace"])
                 if status < 0 {
                     DispatchQueue.main.async { [weak self] in
                         self?.resolveLoad(.failure(PlaybackError.unknown))

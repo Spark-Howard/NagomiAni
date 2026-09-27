@@ -5,6 +5,7 @@ struct ContentView: View {
     @StateObject private var model = PlayerModel()
     @StateObject private var account = AccountViewModel()
     @StateObject private var library = LibraryViewModel()
+    @StateObject private var online = OnlineStore()
     @StateObject private var search = SearchViewModel()
     @StateObject private var contacts = ContactsStore()
     /// 常驻的聊天网页控制器（切板块回来不丢页面/登录态）
@@ -170,6 +171,26 @@ struct ContentView: View {
             ChatPage(account: account, web: webChat)
         case .search:
             SearchPage(model: search)
+        case .online:
+            OnlinePage(model: online) { target in
+                // 在线点播：切到播放器页并加载网络流（绑定/续播/自动标记看过走同一套链路）
+                selection = .player
+                Task {
+                    await model.load(
+                        url: target.url,
+                        librarySubjectID: target.boundSubjectID,
+                        librarySubject: target.boundSubject,
+                        displayTitle: target.displayTitle,
+                        resumeKey: target.resumeKey,
+                        mediaOverride: MediaOverride(
+                            episodeNumber: target.episodeNumber,
+                            seriesKey: target.seriesKey
+                        ),
+                        httpHeaders: target.httpHeaders,
+                        userAgent: target.userAgent
+                    )
+                }
+            }
         case .player:
             PlayerView(model: model)
         }
@@ -252,6 +273,7 @@ struct SidebarView: View {
 enum SidebarItem: String, CaseIterable, Identifiable {
     case player
     case library
+    case online
     case search
     case bangumi
     case chat
@@ -262,6 +284,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .player: return "播放器"
         case .library: return "番库"
+        case .online: return "在线"
         case .search: return "搜索"
         case .bangumi: return "Bangumi"
         case .chat: return "聊天"
@@ -272,6 +295,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .player: return "play.rectangle"
         case .library: return "books.vertical"
+        case .online: return "play.tv"
         case .search: return "magnifyingglass"
         case .bangumi: return "person.crop.circle"
         case .chat: return "message"

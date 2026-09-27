@@ -137,6 +137,36 @@ final class MacCMSProviderTests: XCTestCase {
         XCTAssertFalse(MacCMSProvider.isJunkTitle(nil))
     }
 
+    // MARK: - HTML 实体解码（站点脏数据）
+
+    func testDecodeHTMLEntities() {
+        // 量子源实测：单重转义
+        XCTAssertEqual(MacCMSProvider.decodeHTMLEntities("It&#039;s MyGO!!!!!"), "It's MyGO!!!!!")
+        // 量子源实测：双重转义（&amp;#39; → &#039; → '）
+        XCTAssertEqual(MacCMSProvider.decodeHTMLEntities("It&amp;#39;s MyGO!!!!!"), "It's MyGO!!!!!")
+        // 命名实体
+        XCTAssertEqual(MacCMSProvider.decodeHTMLEntities("A&amp;B&lt;C&gt;&nbsp;D"), "A&B<C> D")
+        // 缺分号的坏实体也能解（容忍站点脏数据）
+        XCTAssertEqual(MacCMSProvider.decodeHTMLEntities("Re&#39zero"), "Re'zero")
+        // 无实体原样；未知命名实体保留；nil 透传
+        XCTAssertEqual(MacCMSProvider.decodeHTMLEntities("普通标题"), "普通标题")
+        XCTAssertEqual(MacCMSProvider.decodeHTMLEntities("X&foobar;Y"), "X&foobar;Y")
+        XCTAssertNil(MacCMSProvider.decodeHTMLEntities(nil))
+    }
+
+    /// 带实体的标题在 shows(from:) 里被解码后再进入过滤/展示
+    func testShowsDecodeEntitiesBeforeFilter() throws {
+        let data = Data(#"""
+        {"list":[
+            {"vod_id":1,"vod_name":"BanG Dream! It&#039;s MyGO!!!!!","type_name":"日本动漫"},
+            {"vod_id":2,"vod_name":"某番 &amp;#39; 电影解说","type_name":"日本动漫"}
+        ]}
+        """#.utf8)
+        let shows = try MacCMSProvider.shows(from: data, providerID: "test.host")
+        // 解码发生在过滤之前：标题干净；带"解说"字样的条目被剔除
+        XCTAssertEqual(shows.map(\.title), ["BanG Dream! It's MyGO!!!!!"])
+    }
+
     func testDecodeListGarbageThrows() {
         XCTAssertThrowsError(try MacCMSProvider.shows(from: Data("<html>502</html>".utf8), providerID: "x"))
         XCTAssertThrowsError(try MacCMSProvider.shows(from: Data("[]".utf8), providerID: "x"))

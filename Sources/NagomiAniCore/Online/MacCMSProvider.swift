@@ -326,13 +326,70 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
     static func video(from dict: [String: Any]) -> MacCMSVideo {
         MacCMSVideo(
             vodID: scalarString(dict["vod_id"]),
-            name: dict["vod_name"] as? String,
-            pic: dict["vod_pic"] as? String,
-            remarks: dict["vod_remarks"] as? String,
-            typeName: dict["type_name"] as? String,
-            playFrom: dict["vod_play_from"] as? String,
-            playURL: dict["vod_play_url"] as? String
+            // 站点数据带 HTML 实体（&#039; 撇号、&amp;#39; 双重转义都有实测），统一解码：
+            // 标题不再显示乱码字符，带 &amp; 的播放地址也得以修复
+            name: decodeHTMLEntities(dict["vod_name"] as? String),
+            pic: decodeHTMLEntities(dict["vod_pic"] as? String),
+            remarks: decodeHTMLEntities(dict["vod_remarks"] as? String),
+            typeName: decodeHTMLEntities(dict["type_name"] as? String),
+            playFrom: decodeHTMLEntities(dict["vod_play_from"] as? String),
+            playURL: decodeHTMLEntities(dict["vod_play_url"] as? String)
         )
+    }
+
+    /// 解码 HTML 实体：数字（十进制/十六进制，分号可缺——容忍脏数据）+ 常见命名实体。
+    /// 循环最多 3 轮以解掉双重转义（&amp;#39; → &#039; → '）。未知命名实体原样保留。
+    /// 注：用 NSRegularExpression 字符串模式——/…/ 正则字面量在 swift-5 模式下与 `&#` 词法冲突。
+    static func decodeHTMLEntities(_ text: String?) -> String? {
+        guard var result = text, result.contains("&") else { return text }
+        let named: [String: String] = [
+            "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": " ",
+            "hellip": "…", "mdash": "—", "ndash": "–", "middot": "·",
+            "ldquo": "“", "rdquo": "”", "lsquo": "‘", "rsquo": "’",
+        ]
+        for _ in 0..<3 {
+            let before = result
+            result = Self.replaceMatches(
+                in: result,
+                pattern: "&#(?:x([0-9a-fA-F]+)|([0-9]+));?|&([a-zA-Z]{2,8});"
+            ) { groups in
+                if let hex = groups[0] { return Self.entityScalar(hex, radix: 16) }
+                if let dec = groups[1] { return Self.entityScalar(dec, radix: 10) }
+                if let name = groups[2] { return named[name] ?? "&\(name);" }
+                return ""
+            }
+            if result == before { break }
+        }
+        return result
+    }
+
+    /// NSRegularExpression 逐匹配替换（回调拿到各捕获组）
+    private static func replaceMatches(
+        in text: String,
+        pattern: String,
+        transform: (_ groups: [String?]) -> String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let ns = text as NSString
+        var out = ""
+        var cursor = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            out += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            let groups: [String?] = (1..<max(match.numberOfRanges, 1)).map { index in
+                let range = match.range(at: index)
+                return range.location == NSNotFound ? nil : ns.substring(with: range)
+            }
+            out += transform(groups)
+            cursor = match.range.location + match.range.length
+        }
+        out += ns.substring(from: cursor)
+        return out
+    }
+
+    private static func entityScalar(_ digits: String, radix: Int) -> String {
+        guard let value = UInt32(digits, radix: radix),
+              let scalar = Unicode.Scalar(value) else { return "" }
+        return String(Character(scalar))
     }
 
     static func category(from dict: [String: Any]) -> MacCMSCategory {

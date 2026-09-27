@@ -33,6 +33,16 @@ struct ContentView: View {
         // 避免切换页面时 UI 上下跳动（"打开文件"按钮已移入播放器顶部栏）
         .onAppear {
             updateWindowTitle()
+            // 自动连播：注入"下一集"解析（本地番库按文件顺序、云端片源按分集号）
+            model.nextEpisodeResolver = { context in
+                if context.isOnline {
+                    return try? await online.nextPlayback(
+                        seriesKey: context.seriesKey,
+                        afterNumber: context.episodeNumber
+                    )
+                }
+                return library.nextLocalPlayback(after: context.url)
+            }
         }
         .onReceive(model.$fileName) { _ in
             updateWindowTitle()

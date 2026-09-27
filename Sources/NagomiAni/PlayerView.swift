@@ -280,6 +280,17 @@ struct PlayerView: View {
 
                 audioMenu
                 subtitleMenu
+                // 自动连播开关（EOF 自动播下一集；番库/在线分集顺序）
+                Button {
+                    model.autoPlayNextEnabled.toggle()
+                } label: {
+                    Image(systemName: model.autoPlayNextEnabled
+                          ? "arrow.right.circle.fill" : "arrow.right.circle")
+                        .font(.title3)
+                        .foregroundStyle(model.autoPlayNextEnabled ? Color.accentColor : .white)
+                }
+                .buttonStyle(.plain)
+                .help(model.autoPlayNextEnabled ? "自动连播：开（点击关闭）" : "自动连播：关（点击开启）")
                 Button {
                     toggleFullScreen()
                 } label: {

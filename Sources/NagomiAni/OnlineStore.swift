@@ -1,18 +1,21 @@
 import Foundation
 import NagomiAniCore
 
-/// 在线页点播时要交给 PlayerModel.load 的全部参数
+/// 播放参数包：在线页/云端番库点播时交给 PlayerModel.load 的全部内容，
+/// 也作为自动连播"下一集"的载体（本地下一集 isLocal=true，seriesKey/resumeKey 留空）
 struct OnlinePlayback {
     let url: URL
-    let displayTitle: String
+    let displayTitle: String?
     let seriesKey: String
     let episodeNumber: Int
-    let resumeKey: String
+    let resumeKey: String?
     let httpHeaders: [String: String]
     let userAgent: String?
     /// 已绑定的 Bangumi 条目（nil = 未绑定；经 PlayerModel.bindLocal 复用绑定保证播完自动同步）
     let boundSubjectID: Int?
     let boundSubject: Subject?
+    /// 本地文件（来自番库的连播目标）；false = 在线流
+    var isLocal: Bool = false
 }
 
 /// 在线片源页的状态模型：
@@ -377,6 +380,22 @@ final class OnlineStore: ObservableObject {
 
     private func provider(id: String) -> SourceProvider? {
         providers.first { $0.id == id }
+    }
+
+    // MARK: - 自动连播（云端下一集）
+
+    /// 解析同一片源里的下一集；没有下一集返回 nil（连播自然停止）
+    func nextPlayback(seriesKey: String, afterNumber: Int) async throws -> OnlinePlayback? {
+        guard let show = show(forSeriesKey: seriesKey) else { return nil }
+        await ensureEpisodes(for: show)
+        guard let episodes = episodes[show.id],
+              let next = episodes.first(where: { $0.number > afterNumber }) else { return nil }
+        return try await preparePlayback(show: show, episode: next)
+    }
+
+    /// seriesKey 反查番（目录与云端番库收藏都在找）
+    private func show(forSeriesKey seriesKey: String) -> OnlineShow? {
+        (shows + libraryEntries.map(\.asShow)).first { $0.seriesKey == seriesKey }
     }
 
     /// 播放器顶部/窗口标题统一显示的标题

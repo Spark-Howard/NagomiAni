@@ -10,6 +10,14 @@ struct MediaOverride: Equatable {
     let seriesKey: String
 }
 
+/// 自动连播解析"下一集"所需的当前播放上下文
+struct AutoNextContext {
+    let url: URL
+    let seriesKey: String
+    let episodeNumber: Int
+    let isOnline: Bool
+}
+
 /// 播放器的 UI 状态模型：桥接 PlaybackEngine 与 SwiftUI
 final class PlayerModel: ObservableObject {
     @Published private(set) var state: PlaybackState = .idle
@@ -32,6 +40,17 @@ final class PlayerModel: ObservableObject {
     @Published var isBindSheetPresented = false
     @Published var searchResults: [Subject] = []
     @Published var isSearching = false
+
+    // 自动连播
+    /// 播完自动播放下一集（番库/在线分集顺序；最后一集自动停）
+    @Published var autoPlayNextEnabled: Bool =
+        UserDefaults.standard.object(forKey: "player.autoplayNext") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoPlayNextEnabled, forKey: Self.autoPlayNextKey) }
+    }
+    /// 由 ContentView 注入：解析下一集（本地番库按文件顺序、云端片源按分集号）
+    var nextEpisodeResolver: ((AutoNextContext) async -> OnlinePlayback?)?
+    private var autoNextContext: AutoNextContext?
+    private static let autoPlayNextKey = "player.autoplayNext"
 
     let engine = MPVPlaybackEngine()
 
@@ -100,6 +119,13 @@ final class PlayerModel: ObservableObject {
         } else {
             currentMedia = MediaMatching.parse(fileName: url.lastPathComponent)
         }
+        // 记录连播上下文（EOF 时由 nextEpisodeResolver 解析下一集）
+        autoNextContext = AutoNextContext(
+            url: url,
+            seriesKey: currentMedia?.seriesKey ?? "",
+            episodeNumber: currentMedia?.episodeNumber ?? 0,
+            isOnline: mediaOverride != nil
+        )
         // 在线片源与番库同样在来源页完成关联，顶部不再提示"关联条目"
         hideBindingBar = fromLibrary || mediaOverride != nil
         syncMessage = nil
@@ -502,6 +528,37 @@ extension PlayerModel: PlaybackEngineDelegate {
         // 播完：清续播记录，下次从头开始
         clearResume()
         autoSyncOnFinish()
+        // 自动连播：解析并加载下一集（解析不到 = 最后一集，自然停止）
+        Task { await playNextIfNeeded() }
+    }
+
+    private func playNextIfNeeded() async {
+        guard autoPlayNextEnabled,
+              let context = autoNextContext,
+              let resolver = nextEpisodeResolver else { return }
+        guard let next = await resolver(context) else { return }
+        if next.isLocal {
+            await load(
+                url: next.url,
+                fromLibrary: true,
+                librarySubjectID: next.boundSubjectID,
+                librarySubject: next.boundSubject
+            )
+        } else {
+            await load(
+                url: next.url,
+                librarySubjectID: next.boundSubjectID,
+                librarySubject: next.boundSubject,
+                displayTitle: next.displayTitle,
+                resumeKey: next.resumeKey,
+                mediaOverride: MediaOverride(
+                    episodeNumber: next.episodeNumber,
+                    seriesKey: next.seriesKey
+                ),
+                httpHeaders: next.httpHeaders,
+                userAgent: next.userAgent
+            )
+        }
     }
 
     func playbackEngine(_ engine: PlaybackEngine, didFailWith error: Error) {}

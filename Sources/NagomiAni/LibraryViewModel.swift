@@ -298,6 +298,31 @@ final class LibraryViewModel: ObservableObject {
         reload()
     }
 
+    // MARK: - 自动连播（本地下一集）
+
+    /// 找本地系列的下一集（按番库文件顺序）；没有下一集返回 nil
+    func nextLocalPlayback(after url: URL) -> OnlinePlayback? {
+        guard let series = library.series.first(where: { $0.files.contains { $0.path == url.path } }) else {
+            return nil
+        }
+        let files = series.sortedFiles
+        guard let index = files.firstIndex(where: { $0.path == url.path }),
+              index + 1 < files.count else { return nil }
+        let next = files[index + 1]
+        return OnlinePlayback(
+            url: URL(fileURLWithPath: next.path),
+            displayTitle: nil,
+            seriesKey: "",
+            episodeNumber: next.episodeNumber ?? 0,
+            resumeKey: nil,
+            httpHeaders: [:],
+            userAgent: nil,
+            boundSubjectID: series.subjectID,
+            boundSubject: cover(for: series),
+            isLocal: true
+        )
+    }
+
     // MARK: - 封面与名称
 
     func cover(for series: Series) -> Subject? {

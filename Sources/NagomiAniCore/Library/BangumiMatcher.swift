@@ -93,7 +93,48 @@ public final class BangumiMatcher: @unchecked Sendable {
     /// 供"导入后根据名字提供关联建议"使用
     public func candidates(series: Series, limit: Int = 5) async throws -> [MatchCandidate] {
         let hint = Self.seriesHint(from: series)
-        var titles = Self.searchTitles(series: series)
+        let titles = Self.searchTitles(series: series)
+        return try await searchAndScore(
+            titles: titles,
+            episodeCount: series.files.count,
+            localSeason: hint.season,
+            limit: limit
+        )
+    }
+
+    /// 对**无本地文件的在线条目**执行匹配（与番库同一套评分机制）：
+    /// 标题/季号来自片源标题，集数佐证用片源分集数（nil 则跳过佐证）
+    public func candidates(title: String, episodeCount: Int?, season: Int? = nil, limit: Int = 5) async throws -> [MatchCandidate] {
+        return try await searchAndScore(
+            titles: Self.onlineSearchTitles(from: title),
+            episodeCount: episodeCount,
+            localSeason: season,
+            limit: limit
+        )
+    }
+
+    /// 在线条目的搜索关键词生成：清洗标题 + 去空格变体（与番库 searchTitles 同思路，纯函数可测）
+    public static func onlineSearchTitles(from title: String) -> [String] {
+        var titles: [String] = []
+        let cleaned = cleanTitle(title)
+        if !cleaned.isEmpty {
+            titles.append(cleaned)
+        }
+        let noSpace = cleaned.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        if !noSpace.isEmpty, noSpace != cleaned, !titles.contains(noSpace) {
+            titles.append(noSpace)
+        }
+        return titles
+    }
+
+    /// 共用的"搜索 → 评分 → 去重排序"循环（番库与在线条目共用，保证机制一致）
+    private func searchAndScore(
+        titles: [String],
+        episodeCount: Int?,
+        localSeason: Int?,
+        limit: Int
+    ) async throws -> [MatchCandidate] {
+        var titles = titles
 
         // 跨语言扩展：中文名 → 英文 / 英文名 → 中文（借助翻译），提高命中率
         if let primary = titles.first {
@@ -106,9 +147,6 @@ public final class BangumiMatcher: @unchecked Sendable {
 
         var bestByID: [Int: MatchCandidate] = [:]
 
-        // 本地季号：优先从文件名众数推导，目录名兜底
-        let localSeason = hint.season
-
         for title in titles.prefix(3) {
             let page = try await client.searchSubjects(keyword: title, limit: 20)
             for subject in page.data {
@@ -117,7 +155,7 @@ public final class BangumiMatcher: @unchecked Sendable {
                 let score = Self.score(
                     subject: subject,
                     against: title,
-                    fileCount: series.files.count,
+                    fileCount: episodeCount ?? 0,
                     localSeason: localSeason
                 )
                 // 门槛放低：跨语言候选分数天然偏低，先展示出来让用户挑选

@@ -162,6 +162,13 @@ struct OnlinePage: View {
                         .lineLimit(1)
                     HStack(spacing: 6) {
                         bindBadge(show)
+                        // 未关联且已有自动匹配结果时提示建议数（与番库同规则：已关联后隐藏）
+                        if model.binding(for: show.seriesKey) == nil,
+                           let candidates = model.bindCandidates[show.id], !candidates.isEmpty {
+                            Text("建议 \(candidates.count)")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                         if let subject = boundSubject(show) {
                             Text(subject.displayName)
                                 .font(.caption)
@@ -477,7 +484,9 @@ struct OnlineSourceSheet: View {
     }
 }
 
-/// 在线番的 Bangumi 绑定 sheet：打开即按番名自动搜索，点选确认；也可手动改关键词
+/// 在线番的 Bangumi 绑定 sheet：与番库的 LibraryBindSheet 同构——
+/// 打开先跑 BangumiMatcher 自动匹配（相似度+集数佐证+季度判定，点选确认），
+/// 也可在下方手动搜索；确认后清除建议缓存
 struct OnlineBindSheet: View {
     @ObservedObject var model: OnlineStore
     let show: OnlineShow
@@ -492,8 +501,49 @@ struct OnlineBindSheet: View {
                 .font(.headline)
                 .lineLimit(1)
 
+            // 自动匹配结果（与番库同一套评分机制）
+            if model.isLoadingCandidates {
+                ProgressView("正在自动匹配…")
+                    .padding(.vertical, 16)
+            } else if let candidates = model.bindCandidates[show.id], !candidates.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("自动匹配结果（点选确认）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ScrollView {
+                        LazyVStack(spacing: 4) {
+                            ForEach(candidates) { candidate in
+                                Button {
+                                    model.bind(subject: candidate.subject, to: show)
+                                    dismiss()
+                                } label: {
+                                    candidateRow(candidate)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 180)
+                }
+            } else if let message = model.statusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 8)
+            } else {
+                Text("没有自动匹配结果，请用下方搜索")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 8)
+            }
+
+            Divider()
+
+            // 手动搜索
             HStack {
-                TextField("搜索条目", text: $keyword)
+                TextField("搜索其它条目", text: $keyword)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { search() }
                 Button("搜索") { search() }
@@ -503,7 +553,6 @@ struct OnlineBindSheet: View {
             if model.isSearching {
                 ProgressView()
                     .controlSize(.small)
-                    .padding(.vertical, 12)
             } else if hasSearched {
                 if model.searchResults.isEmpty {
                     Text("没有找到相关条目，换个关键词试试")
@@ -522,28 +571,40 @@ struct OnlineBindSheet: View {
                         .buttonStyle(.plain)
                     }
                 }
-            } else {
-                Text("正在按番名搜索…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 12)
-            }
-
-            if let message = model.statusMessage {
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .center)
             }
         }
         .padding(16)
-        .frame(width: 460, height: 460)
+        .frame(width: 460, height: 520)
         .onAppear {
-            // 打开即按番名自动搜索（自动匹配只给候选，确认由用户点选——与番库同原则）
+            // 打开即按番名自动匹配（与番库一致：只给候选，确认由用户点选）
             keyword = show.title
-            search()
+            Task { await model.loadBindCandidates(for: show) }
         }
+    }
+
+    /// 与 LibraryBindSheet.candidateRow 同样式：中文名 + 原名 + 相似度百分比 + 集数
+    private func candidateRow(_ candidate: MatchCandidate) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(candidate.subject.displayName.isEmpty ? "未命名" : candidate.subject.displayName)
+                    .font(.body)
+                    .lineLimit(1)
+                Text(candidate.subject.name ?? "")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Text("\(Int(candidate.score * 100))%")
+                .font(.caption)
+                .monospacedDigit()
+                .foregroundStyle(.orange)
+            Text("共 \(candidate.subject.episodeCount ?? 0) 集")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(6)
+        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func subjectRow(_ subject: Subject) -> some View {

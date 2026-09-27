@@ -130,4 +130,42 @@ final class BangumiMatcherTests: XCTestCase {
         XCTAssertTrue(TitleTranslator.containsCJK("命运石之门"))
         XCTAssertFalse(TitleTranslator.containsCJK("Initial D"))
     }
+
+    // MARK: - 在线条目匹配（与番库同一套机制）
+
+    /// 在线条目的搜索关键词生成：清洗标签 + 去空格变体
+    func testOnlineSearchTitles() {
+        XCTAssertEqual(
+            BangumiMatcher.onlineSearchTitles(from: "葬送的芙莉莲"),
+            ["葬送的芙莉莲"]
+        )
+        // 字幕组/画质标签被清洗；清洗后无内部空格 → 只有一个变体
+        XCTAssertEqual(
+            BangumiMatcher.onlineSearchTitles(from: "[NagomiSub] 葬送的芙莉莲 [1080p]"),
+            ["葬送的芙莉莲"]
+        )
+        // 标题本身含空格 → 追加去空格变体提高命中率
+        XCTAssertEqual(
+            BangumiMatcher.onlineSearchTitles(from: "Frieren Sousou no"),
+            ["Frieren Sousou no", "FrierenSousouno"]
+        )
+        XCTAssertTrue(BangumiMatcher.onlineSearchTitles(from: "  ").isEmpty)
+    }
+
+    /// 在线条目评分与番库一致：集数佐证同样生效（片源集数 vs Bangumi 总集数）
+    func testOnlineScoreUsesEpisodeCountCorroboration() {
+        let subject = makeSubject(nameCN: "葬送的芙莉莲", totalEpisodes: 28)
+        // 片源 28 集 vs 条目 28 集 → 佐证加分
+        let withMatch = BangumiMatcher.score(subject: subject, against: "葬送的芙莉莲", fileCount: 28)
+        // 片源集数远超条目 → 扣分（很可能是另一部/另一季）
+        let withMismatch = BangumiMatcher.score(subject: subject, against: "葬送的芙莉莲", fileCount: 80)
+        XCTAssertGreaterThan(withMatch, withMismatch)
+    }
+
+    private func makeSubject(nameCN: String, totalEpisodes: Int?) -> Subject {
+        let json = """
+        {"id": 1, "name": "\(nameCN)", "name_cn": "\(nameCN)", "total_episodes": \(totalEpisodes ?? 0)}
+        """.data(using: .utf8)!
+        return try! JSONDecoder().decode(Subject.self, from: json)
+    }
 }

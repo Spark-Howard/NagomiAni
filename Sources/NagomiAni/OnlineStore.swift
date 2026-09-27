@@ -164,6 +164,43 @@ final class OnlineStore: ObservableObject {
     /// 当前绑定 sheet 的目标番（nil = 关闭）
     @Published var bindTarget: OnlineShow?
 
+    // MARK: - 自动匹配候选（与番库同一套 BangumiMatcher 评分：相似度 + 集数佐证 + 季度判定）
+
+    /// show.id → 自动匹配候选（nil = 还没算过；确认绑定后清空）
+    @Published private(set) var bindCandidates: [String: [MatchCandidate]] = [:]
+    @Published private(set) var isLoadingCandidates = false
+
+    /// 为指定番计算自动匹配候选（打开绑定 sheet 时触发；有缓存不重复请求）
+    func loadBindCandidates(for show: OnlineShow) async {
+        if bindCandidates[show.id] != nil { return }
+        guard !isLoadingCandidates else { return }
+        isLoadingCandidates = true
+        defer { isLoadingCandidates = false }
+        guard let client = await BangumiSession.makeClient() else {
+            statusMessage = "未登录 Bangumi，无法自动匹配（请先在「聊天」页登录）"
+            return
+        }
+        // 集数佐证用片源分集数（列表还没加载过就先拉一次）
+        var episodeCount: Int? = episodes[show.id]?.count
+        if episodeCount == nil {
+            await ensureEpisodes(for: show)
+            episodeCount = episodes[show.id]?.count
+        }
+        // 季号与番库同源：从标题识别（"第二季"/"S2" 等）
+        let season = MediaMatching.seasonNumber(from: show.title)
+        do {
+            let matcher = BangumiMatcher(client: client)
+            bindCandidates[show.id] = try await matcher.candidates(
+                title: show.title,
+                episodeCount: episodeCount,
+                season: season,
+                limit: 5
+            )
+        } catch {
+            statusMessage = "自动匹配失败：\(error.localizedDescription)"
+        }
+    }
+
     func binding(for seriesKey: String) -> Int? {
         (UserDefaults.standard.dictionary(forKey: PlayerModel.bindingsKey) as? [String: Int])?[seriesKey]
     }
@@ -178,6 +215,8 @@ final class OnlineStore: ObservableObject {
         UserDefaults.standard.set(names, forKey: PlayerModel.boundNamesKey)
         subjects[subject.id] = subject
         bindTarget = nil
+        // 已关联不再显示"建议 N"，之后点"更换"会重新匹配（与番库同规则）
+        bindCandidates[show.id] = nil
         statusMessage = "已关联「\(names[seriesKey] ?? "")」，本系列播完自动同步"
         Task { await refreshWatched(for: show) }
     }

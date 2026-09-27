@@ -382,8 +382,11 @@ struct OnlinePage: View {
             set: { expanded in
                 if expanded {
                     expandedShows.insert(show.id)
-                    // 展开时刷新已看徽章（绑定可能刚在别处同步过）
-                    Task { await model.refreshWatched(for: show) }
+                    // 在这里查看过分集同样算"已看过"（更新提醒基准）；顺带刷新已看徽章
+                    Task {
+                        await model.refreshWatched(for: show)
+                        model.markEpisodesSeen(show)
+                    }
                 } else {
                     expandedShows.remove(show.id)
                 }

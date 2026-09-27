@@ -265,6 +265,15 @@ struct LibraryPage: View {
                             .padding(.vertical, 2)
                             .background(Color.blue.opacity(0.15), in: Capsule())
                             .foregroundStyle(.blue)
+                        // 拉取式更新提醒：展开时刷新分集并清零，收起后出新集会显示
+                        if let newCount = online.newEpisodeCount(for: show) {
+                            Text("新集 \(newCount)")
+                                .font(.caption2)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.15), in: Capsule())
+                                .foregroundStyle(.orange)
+                        }
                         Text(online.binding(for: show.seriesKey) != nil ? "已关联" : "未关联")
                             .font(.caption2)
                             .padding(.horizontal, 6)
@@ -360,8 +369,12 @@ struct LibraryPage: View {
             set: { expanded in
                 if expanded {
                     expandedCloud.insert(show.id)
-                    // 展开时刷新已看徽章（与在线页同规则）
-                    Task { await online.refreshWatched(for: show) }
+                    // 展开即检查更新（拉取式）：刷新分集 + 记录已查看数量；顺带刷新已看徽章
+                    Task {
+                        await online.refreshEpisodes(for: show)
+                        online.markEpisodesSeen(show)
+                        await online.refreshWatched(for: show)
+                    }
                 } else {
                     expandedCloud.remove(show.id)
                 }

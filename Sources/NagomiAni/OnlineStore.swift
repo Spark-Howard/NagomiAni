@@ -394,6 +394,35 @@ final class OnlineStore: ObservableObject {
         providers.first { $0.id == id }
     }
 
+    // MARK: - 追番更新提醒（拉取式：展开云端番时刷新分集并对比上次查看数量）
+
+    /// 有新集的数量（当前分集数 - 上次展开查看时的数量）；nil = 无数据或没更新
+    func newEpisodeCount(for show: OnlineShow) -> Int? {
+        guard let entry = libraryEntries.first(where: { $0.id == show.id }),
+              let lastSeen = entry.lastSeenEpisodeCount,
+              let count = episodes[show.id]?.count, count > lastSeen else { return nil }
+        return count - lastSeen
+    }
+
+    /// 标记该番的分集已查看（展开番行时调用）
+    func markEpisodesSeen(_ show: OnlineShow) {
+        guard let index = libraryEntries.firstIndex(where: { $0.id == show.id }) else { return }
+        let count = episodes[show.id]?.count ?? 0
+        guard libraryEntries[index].lastSeenEpisodeCount != count else { return }
+        libraryEntries[index].lastSeenEpisodeCount = count
+        saveLibraryEntries()
+    }
+
+    /// 强制重新拉取分集（忽略缓存）——检查资源站是否更新了新集
+    func refreshEpisodes(for show: OnlineShow) async {
+        guard let provider = provider(id: show.providerID) else { return }
+        do {
+            episodes[show.id] = try await provider.episodes(for: show.showID)
+        } catch {
+            statusMessage = "\(provider.displayName) 分集刷新失败：\(error.localizedDescription)"
+        }
+    }
+
     // MARK: - 自动连播（云端下一集）
 
     /// 解析同一片源里的下一集；没有下一集返回 nil（连播自然停止）
@@ -562,6 +591,8 @@ struct OnlineLibraryEntry: Codable, Identifiable, Equatable {
     let showID: String
     let title: String
     let subtitle: String?
+    /// 上次展开查看时的分集数（更新提醒的对比基准；nil = 还没看过）
+    var lastSeenEpisodeCount: Int?
 
     var id: String { "\(providerID):\(showID)" }
 
@@ -570,6 +601,7 @@ struct OnlineLibraryEntry: Codable, Identifiable, Equatable {
         self.showID = show.showID
         self.title = show.title
         self.subtitle = show.subtitle
+        self.lastSeenEpisodeCount = nil
     }
 
     /// 还原为 OnlineShow（取流/Bangumi 绑定/已看徽章都需要）

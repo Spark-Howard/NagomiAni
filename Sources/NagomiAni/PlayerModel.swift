@@ -52,6 +52,14 @@ final class PlayerModel: ObservableObject {
     private var autoNextContext: AutoNextContext?
     private static let autoPlayNextKey = "player.autoplayNext"
 
+    // 多线路（在线源）
+    /// 当前线路下标（0 起；单线路时无意义）
+    @Published private(set) var routeIndex = 0
+    /// 当前媒体可用线路数（>1 时播放器显示切换菜单）
+    @Published private(set) var routeCount = 0
+    /// 当前在线播放的全部参数（换线/换源复用；本地播放为 nil）
+    private var activeOnline: OnlinePlayback?
+
     let engine = MPVPlaybackEngine()
 
     private var currentMedia: (episodeNumber: Int?, seriesKey: String)?
@@ -108,7 +116,8 @@ final class PlayerModel: ObservableObject {
         resumeKey: String? = nil,
         mediaOverride: MediaOverride? = nil,
         httpHeaders: [String: String] = [:],
-        userAgent: String? = nil
+        userAgent: String? = nil,
+        routes: [String]? = nil
     ) async {
         // 换文件前先把上一个文件的位置落盘
         flushResume(force: true)
@@ -142,12 +151,58 @@ final class PlayerModel: ObservableObject {
         pendingResume = (path: resumePath, position: resumeAt ?? 0, duration: 0)
         pendingResumeTarget = resumeAt
         lastResumeSaveAt = Date()
-        do {
-            try await engine.load(url: url, options: PlaybackOptions(
-                startTime: resumeAt ?? 0,
+
+        // 在线多线路：记录全部参数供换线/自动换源复用；本地播放清空
+        if let override = mediaOverride {
+            activeOnline = OnlinePlayback(
+                url: url,
+                displayTitle: displayTitle,
+                seriesKey: override.seriesKey,
+                episodeNumber: override.episodeNumber ?? 0,
+                resumeKey: resumeKey,
                 httpHeaders: httpHeaders,
-                userAgent: userAgent
-            ))
+                userAgent: userAgent,
+                boundSubjectID: librarySubjectID,
+                boundSubject: librarySubject,
+                routes: routes ?? [url.absoluteString]
+            )
+        } else {
+            activeOnline = nil
+        }
+        routeCount = mediaOverride != nil ? (routes?.count ?? 1) : 0
+        routeIndex = 0
+
+        // 线路依次尝试：首选失败自动换下一条（全部失败才放弃）
+        var routeURLs: [URL] = [url]
+        if mediaOverride != nil, let provided = routes {
+            var list = provided.compactMap { URL(string: $0) }
+            if list.first != url {
+                list.removeAll { $0 == url }
+                list.insert(url, at: 0)
+            }
+            if !list.isEmpty {
+                routeURLs = list
+            }
+        }
+        do {
+            for (index, attempt) in routeURLs.enumerated() {
+                do {
+                    try await engine.load(url: attempt, options: PlaybackOptions(
+                        startTime: resumeAt ?? 0,
+                        httpHeaders: httpHeaders,
+                        userAgent: userAgent
+                    ))
+                    routeIndex = index
+                    break
+                } catch {
+                    // 还有备用线路：提示并继续；没有则把错误抛给外层（引擎已上报 failed）
+                    if index + 1 < routeURLs.count {
+                        syncMessage = "线路加载失败，自动切换下一条…"
+                        continue
+                    }
+                    throw error
+                }
+            }
             if let resumeAt {
                 syncMessage = "已从 \(Self.format(resumeAt)) 继续播放"
             }
@@ -552,6 +607,30 @@ extension PlayerModel: PlaybackEngineDelegate {
         Task { await playNextIfNeeded() }
     }
 
+    /// 手动切换线路：保留当前播放位置重载（播放中途画质/速度差时用）
+    func switchRoute(to index: Int) {
+        guard let active = activeOnline, active.routes.indices.contains(index), index != routeIndex else { return }
+        guard let target = URL(string: active.routes[index]) else { return }
+        let resumeAt = max(currentTime, 0)
+        Task { [weak self] in
+            guard let self else { return }
+            // 换线前把当前位置落盘；重载后从该位置继续（属用户操作，清起播闸门）
+            flushResume(force: true)
+            pendingResumeTarget = nil
+            do {
+                try await engine.load(url: target, options: PlaybackOptions(
+                    startTime: resumeAt,
+                    httpHeaders: active.httpHeaders,
+                    userAgent: active.userAgent
+                ))
+                routeIndex = index
+                syncMessage = "已切换到线路 \(index + 1)"
+            } catch {
+                syncMessage = "线路切换失败"
+            }
+        }
+    }
+
     private func playNextIfNeeded() async {
         guard autoPlayNextEnabled,
               let context = autoNextContext,
@@ -576,7 +655,8 @@ extension PlayerModel: PlaybackEngineDelegate {
                     seriesKey: next.seriesKey
                 ),
                 httpHeaders: next.httpHeaders,
-                userAgent: next.userAgent
+                userAgent: next.userAgent,
+                routes: next.routes
             )
         }
     }

@@ -249,7 +249,8 @@ struct ContentView: View {
                             seriesKey: playback.seriesKey
                         ),
                         httpHeaders: playback.httpHeaders,
-                        userAgent: playback.userAgent
+                        userAgent: playback.userAgent,
+                        routes: playback.routes
                     )
                 }
                 }
@@ -278,7 +279,8 @@ struct ContentView: View {
                             seriesKey: target.seriesKey
                         ),
                         httpHeaders: target.httpHeaders,
-                        userAgent: target.userAgent
+                        userAgent: target.userAgent,
+                        routes: target.routes
                     )
                 }
             }

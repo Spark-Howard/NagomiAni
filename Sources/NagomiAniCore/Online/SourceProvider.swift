@@ -37,15 +37,20 @@ public struct OnlineEpisode: Identifiable, Codable, Sendable, Hashable {
     public let title: String?
     /// Provider 特有的取流提示（如资源站的分片 URL）。点播时 streamURL 优先使用，免二次请求
     public let streamHint: String?
+    /// 全部可用线路（含 streamHint；不同资源站/清晰度的同集地址）。
+    /// 播放失败自动换源与手动"切换线路"依赖此数组；nil = 单线路
+    public let routes: [String]?
 
     public var id: String { "\(providerID):\(showID):\(number)" }
 
-    public init(providerID: String, showID: String, number: Int, title: String? = nil, streamHint: String? = nil) {
+    public init(providerID: String, showID: String, number: Int, title: String? = nil,
+                streamHint: String? = nil, routes: [String]? = nil) {
         self.providerID = providerID
         self.showID = showID
         self.number = number
         self.title = title
         self.streamHint = streamHint
+        self.routes = routes
     }
 
     public var seriesKey: String { OnlineShow.seriesKey(providerID: providerID, showID: showID) }

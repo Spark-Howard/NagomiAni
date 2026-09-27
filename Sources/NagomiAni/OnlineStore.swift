@@ -14,6 +14,8 @@ struct OnlinePlayback {
     /// 已绑定的 Bangumi 条目（nil = 未绑定；经 PlayerModel.bindLocal 复用绑定保证播完自动同步）
     let boundSubjectID: Int?
     let boundSubject: Subject?
+    /// 全部可用线路（含当前 url；播放失败自动换源与手动切换线路用）
+    var routes: [String] = []
     /// 本地文件（来自番库的连播目标）；false = 在线流
     var isLocal: Bool = false
 }
@@ -374,8 +376,18 @@ final class OnlineStore: ObservableObject {
             httpHeaders: source.httpHeaders,
             userAgent: source.userAgent,
             boundSubjectID: boundID,
-            boundSubject: boundID.flatMap { subjects[$0] }
+            boundSubject: boundID.flatMap { subjects[$0] },
+            routes: Self.routeList(episode: episode, primary: playURL)
         )
+    }
+
+    /// 线路列表：当前地址在最前（缓存副本优先），片源给的其余线路去重追加
+    static func routeList(episode: OnlineEpisode, primary: URL) -> [String] {
+        var list = [primary.absoluteString]
+        for route in episode.routes ?? [] where !list.contains(route) {
+            list.append(route)
+        }
+        return list
     }
 
     private func provider(id: String) -> SourceProvider? {

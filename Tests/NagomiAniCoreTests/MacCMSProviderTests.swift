@@ -191,6 +191,10 @@ final class MacCMSProviderTests: XCTestCase {
         XCTAssertEqual(episodes[2].title, "番外篇")
         // 合成键与续播键
         XCTAssertEqual(episodes[0].resumeKey, "online:test.host:12345:1")
+        // 线路：首选组在最前，其余组的同序位地址追加去重
+        XCTAssertEqual(episodes[0].routes, ["http://b/01.m3u8", "http://a/01.swf"])
+        // 末集在其它组没有对应地址 → 单线路，routes 为 nil
+        XCTAssertNil(episodes[2].routes)
     }
 
     func testEpisodesForEmptyDetail() throws {

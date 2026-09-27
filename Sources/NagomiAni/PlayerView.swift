@@ -280,6 +280,10 @@ struct PlayerView: View {
 
                 audioMenu
                 subtitleMenu
+                // 线路切换（在线多线路时显示；播放中换源保留当前进度）
+                if model.routeCount > 1 {
+                    routeMenu
+                }
                 // 自动连播开关（EOF 自动播下一集；番库/在线分集顺序）
                 Button {
                     model.autoPlayNextEnabled.toggle()
@@ -308,6 +312,32 @@ struct PlayerView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
             .padding(12)
         }
+    }
+
+    // MARK: - 线路
+
+    private var routeMenu: some View {
+        Menu {
+            ForEach(0..<model.routeCount, id: \.self) { index in
+                Button {
+                    model.switchRoute(to: index)
+                } label: {
+                    if index == model.routeIndex {
+                        Label("线路 \(index + 1)", systemImage: "checkmark")
+                    } else {
+                        Text("线路 \(index + 1)")
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.title3)
+                .foregroundStyle(.white)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("切换播放线路")
     }
 
     // MARK: - 音轨 / 字幕菜单

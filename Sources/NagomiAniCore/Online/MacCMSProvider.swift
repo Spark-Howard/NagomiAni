@@ -174,45 +174,72 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
         }
     }
 
-    /// 详情响应 → OnlineEpisode（带 streamHint，点播免二次请求）
+    /// 详情响应 → OnlineEpisode（带 streamHint 与全部线路，点播免二次请求）
     static func episodes(from data: Data, providerID: String, showID: String) throws -> [OnlineEpisode] {
         let response = try decodeList(data)
         guard let video = response.list.first(where: { $0.vodID == showID }) ?? response.list.first else {
             return []
         }
-        let pairs = Self.parsePlayURL(playURL: video.playURL, playFrom: video.playFrom)
-        return pairs.enumerated().map { index, pair in
-            OnlineEpisode(
+        let groups = Self.parsePlayGroups(playURL: video.playURL, playFrom: video.playFrom)
+        guard let preferredIndex = Self.preferredGroupIndex(groups: groups) else { return [] }
+        let preferred = groups[preferredIndex]
+
+        return preferred.episodes.enumerated().map { index, pair in
+            // 线路 = 各播放源组在同一序位的地址（首选组在最前，去重保序）；
+            // 播放失败自动换源与手动切换线路都吃这个数组
+            var routes: [String] = [pair.url]
+            for (groupIndex, group) in groups.enumerated() where groupIndex != preferredIndex {
+                if group.episodes.indices.contains(index), !routes.contains(group.episodes[index].url) {
+                    routes.append(group.episodes[index].url)
+                }
+            }
+            return OnlineEpisode(
                 providerID: providerID,
                 showID: showID,
                 // "第01集/EP01/01" 等动漫圈命名走 MediaMatching；解析不出按出现顺序兜底
                 number: MediaMatching.episodeNumber(from: pair.name) ?? index + 1,
                 title: pair.name.isEmpty ? nil : pair.name,
-                streamHint: pair.url
+                streamHint: pair.url,
+                routes: routes.count > 1 ? routes : nil
             )
         }
     }
 
-    /// `播放源A$$$播放源B`，组内 `第01集$url#第02集$url`；优先选播放源名含 m3u8 的组
-    static func parsePlayURL(playURL: String?, playFrom: String?) -> [(name: String, url: String)] {
+    /// `播放源A$$$播放源B`，组内 `第01集$url#第02集$url`；返回全部组（组名来自 playFrom）
+    static func parsePlayGroups(playURL: String?, playFrom: String?) -> [(from: String?, episodes: [(name: String, url: String)])] {
         guard let playURL, !playURL.isEmpty else { return [] }
         let sources = playURL.components(separatedBy: "$$$")
         let froms = (playFrom ?? "").components(separatedBy: "$$$")
-        var sourceIndex = 0
-        if let m3u8Index = froms.firstIndex(where: { $0.lowercased().contains("m3u8") }),
-           sources.indices.contains(m3u8Index) {
-            sourceIndex = m3u8Index
+        return sources.enumerated().compactMap { index, source -> (from: String?, episodes: [(name: String, url: String)])? in
+            let episodes: [(name: String, url: String)] = source.components(separatedBy: "#").compactMap { chunk -> (name: String, url: String)? in
+                let parts = chunk.components(separatedBy: "$")
+                guard parts.count >= 2 else { return nil }
+                let name = parts[0].trimmingCharacters(in: .whitespaces)
+                // URL 里理论上不会再出现 $，但仍以首段之后的全部内容为准，防地址含 $ 被截断
+                let url = parts[1...].joined(separator: "$").trimmingCharacters(in: .whitespaces)
+                guard !url.isEmpty else { return nil }
+                return (name: name, url: url)
+            }
+            guard !episodes.isEmpty else { return nil }
+            let from = index < froms.count ? froms[index] : nil
+            return (from: from, episodes: episodes)
         }
-        guard sources.indices.contains(sourceIndex) else { return [] }
-        return sources[sourceIndex].components(separatedBy: "#").compactMap { chunk in
-            let parts = chunk.components(separatedBy: "$")
-            guard parts.count >= 2 else { return nil }
-            let name = parts[0].trimmingCharacters(in: .whitespaces)
-            // URL 里理论上不会再出现 $，但仍以首段之后的全部内容为准，防地址含 $ 被截断
-            let url = parts[1...].joined(separator: "$").trimmingCharacters(in: .whitespaces)
-            guard !url.isEmpty else { return nil }
-            return (name: name, url: url)
+    }
+
+    /// 首选播放源组：名字含 m3u8 的组优先，否则第一组
+    static func preferredGroupIndex(groups: [(from: String?, episodes: [(name: String, url: String)])]) -> Int? {
+        guard !groups.isEmpty else { return nil }
+        if let m3u8Index = groups.firstIndex(where: { $0.from?.lowercased().contains("m3u8") == true }) {
+            return m3u8Index
         }
+        return 0
+    }
+
+    /// 单组便捷形式（历史 API，内部走 parsePlayGroups 的首选组）
+    static func parsePlayURL(playURL: String?, playFrom: String?) -> [(name: String, url: String)] {
+        let groups = parsePlayGroups(playURL: playURL, playFrom: playFrom)
+        guard let index = preferredGroupIndex(groups: groups) else { return [] }
+        return groups[index].episodes
     }
 
     /// 站点地址归一化：缺 scheme 补 https；空路径/根路径拼标准 API 路径；

@@ -68,7 +68,8 @@ final class StreamCacheTests: XCTestCase {
 
     func testHLSDownloadReportsProgress() async throws {
         let cache = makeCache()
-        let playlistURL = try makeOriginPlaylist(segmentCount: 6)
+        let segmentCount = 6
+        let playlistURL = try makeOriginPlaylist(segmentCount: segmentCount)
 
         var lastProgress: StreamCache.Progress?
         let lock = NSLock()
@@ -79,9 +80,28 @@ final class StreamCacheTests: XCTestCase {
         }
         lock.lock()
         defer { lock.unlock() }
-        XCTAssertEqual(lastProgress?.totalSegments, 6)
-        XCTAssertEqual(lastProgress?.downloadedSegments, 6)
+        XCTAssertEqual(lastProgress?.totalSegments, segmentCount)
+        XCTAssertEqual(lastProgress?.downloadedSegments, segmentCount)
         XCTAssertEqual(lastProgress?.fraction, 1.0)
+        // file:// 分片 HEAD 不适用 → 总大小未知（nil），但已下载字节应准确累加
+        XCTAssertNil(lastProgress?.totalBytes)
+        let expectedBytes = (0..<segmentCount).map { i in
+            Data("payload-\(i)-\(String(repeating: "x", count: 64))".utf8).count
+        }.reduce(0, +)
+        XCTAssertEqual(lastProgress?.downloadedBytes, Int64(expectedBytes))
+    }
+
+    /// 已缓存条目的磁盘占用查询
+    func testSizeBytes() async throws {
+        let cache = makeCache()
+        XCTAssertNil(cache.sizeBytes(for: "s1"))
+        let playlistURL = try makeOriginPlaylist()
+        _ = try await cache.download(playlistURL: playlistURL, cacheKey: "s1")
+        let size = try XCTUnwrap(cache.sizeBytes(for: "s1"))
+        XCTAssertGreaterThan(size, 0)
+        // 清除后为 nil
+        cache.purge(cacheKey: "s1")
+        XCTAssertNil(cache.sizeBytes(for: "s1"))
     }
 
     /// master playlist 自动跟随到唯一变体

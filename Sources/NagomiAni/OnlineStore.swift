@@ -45,8 +45,10 @@ final class OnlineStore: ObservableObject {
     private let cache = StreamCache()
     /// 已完整缓存的 resumeKey 集合
     @Published private(set) var cachedKeys: Set<String> = []
-    /// 下载中的 resumeKey → 进度（0~1，nil 表示未知如单文件下载）
-    @Published private(set) var cacheProgress: [String: Double?] = [:]
+    /// 下载中的 resumeKey → 进度（含字节级：已下载/总大小，总大小可能未知）
+    @Published private(set) var cacheProgress: [String: StreamCache.Progress] = [:]
+    /// 已缓存条目的磁盘占用（resumeKey → 字节）
+    @Published private(set) var cacheSizes: [String: Int64] = [:]
     /// 缓存总字节数
     @Published private(set) var cacheTotalBytes: Int64 = 0
     private var cacheTasks: [String: Task<Void, Never>] = [:]
@@ -207,7 +209,7 @@ final class OnlineStore: ObservableObject {
 
     enum CacheState: Equatable {
         case notCached
-        case downloading(Double?)
+        case downloading(StreamCache.Progress)
         case cached
     }
 
@@ -221,10 +223,22 @@ final class OnlineStore: ObservableObject {
         return .notCached
     }
 
+    /// 已缓存条目的磁盘占用
+    func cacheSize(for episode: OnlineEpisode) -> Int64? {
+        cacheSizes[episode.resumeKey]
+    }
+
     /// 启动时恢复缓存状态展示
     func refreshCacheState() {
         cachedKeys = cache.cachedKeys()
         cacheTotalBytes = cache.totalBytes()
+        var sizes: [String: Int64] = [:]
+        for key in cachedKeys {
+            if let size = cache.sizeBytes(for: key) {
+                sizes[key] = size
+            }
+        }
+        cacheSizes = sizes
     }
 
     /// 手动缓存一集（HLS 走分片下载 + 本地 playlist；渐进式走整文件流式落盘）
@@ -233,7 +247,7 @@ final class OnlineStore: ObservableObject {
         guard cacheTasks[key] == nil, !cachedKeys.contains(key) else { return }
         guard let provider = provider(id: episode.providerID) else { return }
         let cache = cache
-        cacheProgress[key] = nil
+        cacheProgress[key] = StreamCache.Progress(downloadedSegments: 0, totalSegments: 0)
         let task = Task {
             defer { cacheTasks[key] = nil }
             do {
@@ -245,9 +259,8 @@ final class OnlineStore: ObservableObject {
                         userAgent: source.userAgent,
                         cacheKey: key,
                         progress: { [weak self] progress in
-                            let fraction = progress.fraction
                             Task { @MainActor [weak self] in
-                                self?.cacheProgress[key] = fraction
+                                self?.cacheProgress[key] = progress
                             }
                         }
                     )
@@ -256,11 +269,17 @@ final class OnlineStore: ObservableObject {
                         url: source.url,
                         httpHeaders: source.httpHeaders,
                         userAgent: source.userAgent,
-                        cacheKey: key
+                        cacheKey: key,
+                        progress: { [weak self] progress in
+                            Task { @MainActor [weak self] in
+                                self?.cacheProgress[key] = progress
+                            }
+                        }
                     )
                 }
                 cachedKeys.insert(key)
                 cacheProgress[key] = nil
+                cacheSizes[key] = cache.sizeBytes(for: key)
                 cacheTotalBytes = cache.totalBytes()
                 statusMessage = "已缓存「\(show.title) 第 \(episode.number) 集」"
             } catch is CancellationError {
@@ -280,12 +299,14 @@ final class OnlineStore: ObservableObject {
     func removeCache(for episode: OnlineEpisode) {
         cache.purge(cacheKey: episode.resumeKey)
         cachedKeys.remove(episode.resumeKey)
+        cacheSizes[episode.resumeKey] = nil
         cacheTotalBytes = cache.totalBytes()
     }
 
     func clearAllCache() {
         cache.purgeAll()
         cachedKeys.removeAll()
+        cacheSizes.removeAll()
         cacheTotalBytes = 0
         statusMessage = "已清除全部缓存"
     }
@@ -294,6 +315,15 @@ final class OnlineStore: ObservableObject {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+
+    /// 进度条下的尺寸文本："12.3 MB / 45.6 MB"；总大小未知时只显示已下载
+    static func progressBytesLabel(_ progress: StreamCache.Progress) -> String {
+        let downloaded = formattedBytes(progress.downloadedBytes)
+        if let total = progress.totalBytes {
+            return "\(downloaded) / \(formattedBytes(total))"
+        }
+        return downloaded
     }
 
     private func provider(id: String) -> SourceProvider? {

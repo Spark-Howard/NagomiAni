@@ -233,7 +233,7 @@ struct OnlinePage: View {
         .padding(.vertical, 4)
     }
 
-    /// 集行尾部的缓存控制：未缓存=下载、下载中=进度+取消、已缓存=徽章+删除
+    /// 集行尾部的缓存控制：未缓存=下载、下载中=进度条+字节数+取消、已缓存=徽章+大小+删除
     @ViewBuilder
     private func cacheControl(show: OnlineShow, episode: OnlineEpisode) -> some View {
         switch model.cacheState(for: episode) {
@@ -247,14 +247,21 @@ struct OnlinePage: View {
             .foregroundStyle(.secondary)
             .font(.system(size: 15))
             .help("缓存本集到本地")
-        case .downloading(let fraction):
-            if let fraction {
-                Text("\(Int((fraction * 100).rounded()))%")
+        case .downloading(let progress):
+            VStack(alignment: .trailing, spacing: 2) {
+                if let fraction = progress.fraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: 96)
+                } else {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 96, alignment: .trailing)
+                }
+                Text(OnlineStore.progressBytesLabel(progress))
                     .font(.caption2)
                     .monospacedDigit()
-                    .foregroundStyle(.tint)
-            } else {
-                ProgressView().controlSize(.mini)
+                    .foregroundStyle(.secondary)
             }
             Button {
                 model.cancelCache(for: episode)
@@ -266,9 +273,17 @@ struct OnlinePage: View {
             .font(.system(size: 13))
             .help("取消缓存")
         case .cached:
-            Text("已缓存")
-                .font(.caption2)
-                .foregroundStyle(.green)
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("已缓存")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                if let size = model.cacheSize(for: episode) {
+                    Text(OnlineStore.formattedBytes(size))
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
             Button {
                 model.removeCache(for: episode)
             } label: {

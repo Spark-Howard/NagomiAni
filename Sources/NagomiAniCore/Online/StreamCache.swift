@@ -19,9 +19,29 @@ public final class StreamCache: @unchecked Sendable {
     public struct Progress: Sendable, Equatable {
         public let downloadedSegments: Int
         public let totalSegments: Int
+        /// 已下载的字节数（分片按完成时实际大小累加）
+        public let downloadedBytes: Int64
+        /// 总字节数（下载前对分片并发 HEAD 累加 Content-Length）；nil = 源站未提供
+        public let totalBytes: Int64?
 
+        /// 进度条比例：总大小已知按字节，否则退化为分片计数
         public var fraction: Double? {
-            totalSegments > 0 ? Double(downloadedSegments) / Double(totalSegments) : nil
+            if let totalBytes, totalBytes > 0 {
+                return min(Double(downloadedBytes) / Double(totalBytes), 1.0)
+            }
+            return totalSegments > 0 ? Double(downloadedSegments) / Double(totalSegments) : nil
+        }
+
+        public init(
+            downloadedSegments: Int,
+            totalSegments: Int,
+            downloadedBytes: Int64 = 0,
+            totalBytes: Int64? = nil
+        ) {
+            self.downloadedSegments = downloadedSegments
+            self.totalSegments = totalSegments
+            self.downloadedBytes = downloadedBytes
+            self.totalBytes = totalBytes
         }
     }
 
@@ -86,6 +106,11 @@ public final class StreamCache: @unchecked Sendable {
         return totalBytesLocked()
     }
 
+    /// 已完整缓存条目的磁盘占用（未缓存返回 nil）
+    public func sizeBytes(for cacheKey: String) -> Int64? {
+        cachedMediaURL(for: cacheKey) != nil ? directorySize(directory(for: cacheKey)) : nil
+    }
+
     // MARK: - 下载
 
     /// 缓存 HLS（master 自动跟随到最高码率的媒体流），返回本地 m3u8 URL
@@ -127,10 +152,14 @@ public final class StreamCache: @unchecked Sendable {
             initLocalName = localURL.lastPathComponent
         }
 
+        // 预估总大小：并发 HEAD 各分片取 Content-Length（任一未知则总大小按未知处理）
+        let segmentURLs = media.segments.compactMap { HLSParser.resolve($0.uri, against: mediaURL) }
+        let estimatedTotal = await estimateTotalBytes(segmentURLs, httpHeaders: httpHeaders, userAgent: userAgent)
+
         // 分片并发下载（≤4），已存在的分片跳过（中断重下可续）
         let total = media.segments.count
         let completed = ProgressCounter()
-        progress?(Progress(downloadedSegments: 0, totalSegments: total))
+        progress?(Progress(downloadedSegments: 0, totalSegments: total, downloadedBytes: 0, totalBytes: estimatedTotal))
         try await withThrowingTaskGroup(of: Void.self) { group in
             let maxConcurrent = 4
             for (index, segment) in media.segments.enumerated() {
@@ -141,11 +170,17 @@ public final class StreamCache: @unchecked Sendable {
                     let localURL = dir.appendingPathComponent(
                         "seg-\(String(format: "%04d", index)).\(Self.urlExtension(segment.uri, fallback: "ts"))"
                     )
-                    if !FileManager.default.fileExists(atPath: localURL.path) {
+                    var byteCount: Int64
+                    if let existingSize = Self.fileSize(at: localURL) {
+                        byteCount = existingSize // 中断续传：已存在的分片按既有大小计入
+                    } else {
                         let data = try await self.fetchData(segmentURL, httpHeaders: httpHeaders, userAgent: userAgent)
                         try data.write(to: localURL)
+                        byteCount = Int64(data.count)
                     }
-                    progress?(Progress(downloadedSegments: completed.increment(), totalSegments: total))
+                    let (segments, bytes) = completed.increment(by: byteCount)
+                    progress?(Progress(downloadedSegments: segments, totalSegments: total,
+                                       downloadedBytes: bytes, totalBytes: estimatedTotal))
                 }
             }
             try await group.waitForAll()
@@ -170,7 +205,8 @@ public final class StreamCache: @unchecked Sendable {
         httpHeaders: [String: String] = [:],
         userAgent: String? = nil,
         cacheKey: String,
-        fileExtension: String? = nil
+        fileExtension: String? = nil,
+        progress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> URL {
         let dir = try await beginDownload(cacheKey: cacheKey)
         defer { lock.withLock { _ = activeKeys.remove(cacheKey) } }
@@ -178,6 +214,9 @@ public final class StreamCache: @unchecked Sendable {
         let ext = Self.urlExtension(fileExtension.map { ".\($0)" } ?? url.lastPathComponent, fallback: "mp4")
         let localURL = dir.appendingPathComponent("media.\(ext)")
         let (bytes, response) = try await session.bytes(for: makeRequest(url, httpHeaders: httpHeaders, userAgent: userAgent))
+        let totalBytes: Int64? = (response as? HTTPURLResponse).flatMap { http in
+            http.expectedContentLength > 0 ? Int64(http.expectedContentLength) : nil
+        }
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw CacheError.httpStatus(http.statusCode)
         }
@@ -186,16 +225,24 @@ public final class StreamCache: @unchecked Sendable {
         defer { try? handle.close() }
         var buffer = Data()
         buffer.reserveCapacity(1 << 20)
+        var downloaded: Int64 = 0
+        progress?(Progress(downloadedSegments: 0, totalSegments: 0, downloadedBytes: 0, totalBytes: totalBytes))
         for try await byte in bytes {
             buffer.append(byte)
             if buffer.count >= 1 << 20 {
                 try handle.write(contentsOf: buffer)
+                downloaded += Int64(buffer.count)
                 buffer.removeAll(keepingCapacity: true)
+                progress?(Progress(downloadedSegments: 0, totalSegments: 0,
+                                   downloadedBytes: downloaded, totalBytes: totalBytes))
             }
         }
         if !buffer.isEmpty {
             try handle.write(contentsOf: buffer)
+            downloaded += Int64(buffer.count)
         }
+        progress?(Progress(downloadedSegments: 0, totalSegments: 0,
+                           downloadedBytes: downloaded, totalBytes: totalBytes))
         try writeMarker(at: dir, CacheMarker(key: cacheKey, media: localURL.lastPathComponent))
         evictIfNeeded()
         return localURL
@@ -251,6 +298,45 @@ public final class StreamCache: @unchecked Sendable {
     private func fetchPlaylist(_ url: URL, httpHeaders: [String: String], userAgent: String?) async throws -> HLSPlaylist {
         let text = String(decoding: try await fetchData(url, httpHeaders: httpHeaders, userAgent: userAgent), as: UTF8.self)
         return try HLSParser.parse(text)
+    }
+
+    /// 并发 HEAD 各分片取 Content-Length 求和（≤8 并发）；有任一失败/未知返回 nil
+    private func estimateTotalBytes(
+        _ urls: [URL], httpHeaders: [String: String], userAgent: String?
+    ) async -> Int64? {
+        guard !urls.isEmpty else { return nil }
+        return await withTaskGroup(of: Int64?.self) { group in
+            var knownSum: Int64 = 0
+            var anyUnknown = false
+            var launched = 0
+            for url in urls {
+                // 满 8 个先等一个完成再继续发（简单限流）
+                if launched >= 8, let value = await group.next() {
+                    if let size = value { knownSum += size } else { anyUnknown = true }
+                }
+                launched += 1
+                group.addTask {
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "HEAD"
+                    request.timeoutInterval = 10
+                    for (key, value) in httpHeaders {
+                        request.setValue(value, forHTTPHeaderField: key)
+                    }
+                    if let userAgent {
+                        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+                    }
+                    guard let (_, response) = try? await self.session.data(for: request),
+                          let http = response as? HTTPURLResponse,
+                          (200..<300).contains(http.statusCode),
+                          http.expectedContentLength > 0 else { return nil }
+                    return Int64(http.expectedContentLength)
+                }
+            }
+            while let value = await group.next() {
+                if let size = value { knownSum += size } else { anyUnknown = true }
+            }
+            return anyUnknown ? nil : knownSum
+        }
     }
 
     // MARK: - 私有：磁盘布局
@@ -347,17 +433,26 @@ public final class StreamCache: @unchecked Sendable {
         try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
-    /// 线程安全的分片完成计数器
+    /// 线程安全的分片完成计数器（分片数 + 字节数）
     private final class ProgressCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
+        private var bytes: Int64 = 0
 
-        func increment() -> Int {
+        func increment(by byteCount: Int64) -> (segments: Int, bytes: Int64) {
             lock.lock()
             count += 1
-            let current = count
+            bytes += byteCount
+            let currentCount = count
+            let currentBytes = bytes
             lock.unlock()
-            return current
+            return (currentCount, currentBytes)
         }
+    }
+
+    private static func fileSize(at url: URL) -> Int64? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? Int64 else { return nil }
+        return size
     }
 }

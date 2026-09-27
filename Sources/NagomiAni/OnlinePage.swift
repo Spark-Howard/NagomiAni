@@ -33,16 +33,7 @@ struct OnlinePage: View {
         .sheet(isPresented: $showSourceSheet) {
             OnlineSourceSheet(model: model)
         }
-        .sheet(
-            isPresented: Binding(
-                get: { model.bindTarget != nil },
-                set: { if !$0 { model.bindTarget = nil } }
-            )
-        ) {
-            if let show = model.bindTarget {
-                OnlineBindSheet(model: model, show: show)
-            }
-        }
+        // 绑定 sheet 由 ContentView 根视图统一呈现（番库页也会触发）
     }
 
     // MARK: - 视图
@@ -188,6 +179,20 @@ struct OnlinePage: View {
                     }
                 }
                 Spacer()
+                // 加入/移出番库：加入后与本地番并列显示在番库页（云端标记）
+                Button {
+                    if model.isInLibrary(show) {
+                        model.removeFromLibrary(show)
+                    } else {
+                        model.addToLibrary(show)
+                    }
+                } label: {
+                    Image(systemName: model.isInLibrary(show) ? "bookmark.fill" : "bookmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(model.isInLibrary(show) ? Color.accentColor : Color.secondary)
+                .font(.system(size: 15))
+                .help(model.isInLibrary(show) ? "从番库移除" : "加入番库")
                 bindButton(for: show)
                 if model.binding(for: show.seriesKey) != nil {
                     Button {

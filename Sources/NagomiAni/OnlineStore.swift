@@ -59,7 +59,40 @@ final class OnlineStore: ObservableObject {
 
     init() {
         sites = UserDefaults.standard.stringArray(forKey: Self.sitesKey) ?? []
+        if let data = UserDefaults.standard.data(forKey: Self.libraryEntriesKey),
+           let entries = try? JSONDecoder().decode([OnlineLibraryEntry].self, from: data) {
+            libraryEntries = entries
+        }
         rebuildProviders()
+    }
+
+    // MARK: - 云端番库（在线剧集加入番库）
+
+    static let libraryEntriesKey = "online.library.entries"
+    /// 用户加入番库的云端剧集（UserDefaults JSON 持久化；绑定/已看仍在共用绑定表与 Bangumi）
+    @Published private(set) var libraryEntries: [OnlineLibraryEntry] = []
+
+    func isInLibrary(_ show: OnlineShow) -> Bool {
+        libraryEntries.contains { $0.id == show.id }
+    }
+
+    func addToLibrary(_ show: OnlineShow) {
+        guard !isInLibrary(show) else { return }
+        libraryEntries.append(OnlineLibraryEntry(show: show))
+        saveLibraryEntries()
+        statusMessage = "已加入番库：\(show.title)"
+    }
+
+    func removeFromLibrary(_ show: OnlineShow) {
+        libraryEntries.removeAll { $0.id == show.id }
+        saveLibraryEntries()
+        statusMessage = "已从番库移除：\(show.title)"
+    }
+
+    private func saveLibraryEntries() {
+        if let data = try? JSONEncoder().encode(libraryEntries) {
+            UserDefaults.standard.set(data, forKey: Self.libraryEntriesKey)
+        }
     }
 
     /// Mock 样例源永远保留（全链路演示/兜底），后接内置默认源与用户添加的资源站
@@ -488,5 +521,28 @@ enum OnlineStoreError: LocalizedError {
         switch self {
         case .unknownProvider: return "未知的片源提供方"
         }
+    }
+}
+
+/// 云端番库条目：用户从在线页"加入番库"的剧集，与本地番在番库页并列展示。
+/// 点击播放时按 providerID 找到对应片源取流（本地文件走 MediaLibrary，云端走这里）。
+struct OnlineLibraryEntry: Codable, Identifiable, Equatable {
+    let providerID: String
+    let showID: String
+    let title: String
+    let subtitle: String?
+
+    var id: String { "\(providerID):\(showID)" }
+
+    init(show: OnlineShow) {
+        self.providerID = show.providerID
+        self.showID = show.showID
+        self.title = show.title
+        self.subtitle = show.subtitle
+    }
+
+    /// 还原为 OnlineShow（取流/Bangumi 绑定/已看徽章都需要）
+    var asShow: OnlineShow {
+        OnlineShow(providerID: providerID, showID: showID, title: title, subtitle: subtitle)
     }
 }

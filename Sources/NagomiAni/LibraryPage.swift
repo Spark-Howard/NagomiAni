@@ -1,18 +1,28 @@
 import SwiftUI
 import NagomiAniCore
 
-/// 番库页（侧边栏第三页）
+/// 番库页（侧边栏第三页）：本地番与云端番（在线页加入的剧集）并列展示
 struct LibraryPage: View {
     @ObservedObject var model: LibraryViewModel
-    /// 点击某一集时回调（由外层切换到播放器页并加载文件）
+    /// 在线片源（云端番库条目、分集列表、Bangumi 绑定与已看状态都从这里取）
+    @ObservedObject var online: OnlineStore
+    /// 点击本地某一集时回调（由外层切换到播放器页并加载文件）
     var onPlay: (URL) -> Void
+    /// 点击云端某一集时回调（已完成取流的播放参数，与在线页同链路）
+    var onPlayOnline: (OnlinePlayback) -> Void
     @State private var hoveredFilePath: String?
+    @State private var expandedCloud: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             content
             if let message = model.statusMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if let message = online.statusMessage {
                 Text(message)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -55,7 +65,7 @@ struct LibraryPage: View {
             Text("番库")
                 .font(.title2)
             Spacer()
-            if model.isScanning {
+            if model.isScanning || online.isPreparing {
                 ProgressView()
                     .controlSize(.small)
             }
@@ -70,7 +80,7 @@ struct LibraryPage: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.series.isEmpty {
+        if model.series.isEmpty && online.libraryEntries.isEmpty {
             emptyState
         } else {
             seriesList
@@ -82,7 +92,7 @@ struct LibraryPage: View {
             Image(systemName: "books.vertical")
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
-            Text("导入动漫目录后，这里会按「番」聚合显示\n扫描完成后将自动匹配 Bangumi 条目并显示封面")
+            Text("导入本地动漫目录，或在「在线」页把剧集加入番库\n这里会按「番」聚合显示并关联 Bangumi 条目")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
@@ -92,12 +102,21 @@ struct LibraryPage: View {
     private var seriesList: some View {
         ScrollView {
             LazyVStack(spacing: 6) {
-                ForEach(model.series) { series in
-                    seriesRow(series)
+                if !model.series.isEmpty {
+                    sectionHeader("本地番库", systemImage: "internaldrive")
+                    ForEach(model.series) { series in
+                        seriesRow(series)
+                    }
+                }
+                if !online.libraryEntries.isEmpty {
+                    sectionHeader("云端番库", systemImage: "antenna.radiowaves.left.and.right")
+                    ForEach(online.libraryEntries) { entry in
+                        cloudRow(entry)
+                    }
                 }
             }
         }
-        // 「更新」后该番一个本地文件都不剩 → 让用户选择移动/删除
+        // 「更新」后该番一个本地文件都不剩 → 让用户选择移动/删除（原 alert 保留在下方）
         .alert(
             "找不到本地文件",
             isPresented: Binding(
@@ -118,6 +137,164 @@ struct LibraryPage: View {
         } message: { series in
             Text("重新扫描后找不到「\(series.displayName)」的任何本地文件。\n如果是移动到其它位置，选新目录即可保留 Bangumi 关联继续观看；如果确实删除了，将从番库移除该条目。")
         }
+    }
+
+    // MARK: - 云端番库（在线页加入的剧集）
+
+    private func sectionHeader(_ title: String, systemImage: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.title3)
+            Spacer()
+        }
+        .padding(.top, 6)
+    }
+
+    private func cloudRow(_ entry: OnlineLibraryEntry) -> some View {
+        let show = entry.asShow
+        let subject = online.binding(for: show.seriesKey).flatMap { online.subjects[$0] }
+        return DisclosureGroup(isExpanded: expandedCloudBinding(show)) {
+            let eps = online.episodes[show.id] ?? []
+            ForEach(eps) { episode in
+                cloudEpisodeRow(show: show, episode: episode)
+            }
+            if eps.isEmpty {
+                HStack {
+                    Spacer()
+                    ProgressView().controlSize(.small)
+                    Spacer()
+                }
+                .padding(.vertical, 6)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                // 已关联用 Bangumi 封面，否则云端占位图标
+                if let subject, let url = SearchPage.imageURL(subject.images?.common) {
+                    CoverImageView(url: url, cornerRadius: 4)
+                        .frame(width: 44, height: 60)
+                } else {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.tint)
+                        .frame(width: 44, height: 60)
+                        .background(Color.gray.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(show.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text("云端")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.blue)
+                        Text(online.binding(for: show.seriesKey) != nil ? "已关联" : "未关联")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                online.binding(for: show.seriesKey) != nil
+                                    ? Color.green.opacity(0.15)
+                                    : Color.gray.opacity(0.15),
+                                in: Capsule()
+                            )
+                            .foregroundStyle(online.binding(for: show.seriesKey) != nil ? .green : .secondary)
+                        if let subject {
+                            Text(subject.displayName)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        } else if let subtitle = show.subtitle, !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                Spacer()
+                Button {
+                    online.bindTarget = show
+                } label: {
+                    Text(online.binding(for: show.seriesKey) != nil ? "更换" : "关联")
+                }
+                .controlSize(.small)
+                Button {
+                    online.removeFromLibrary(show)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .font(.system(size: 17))
+                .help("从番库移除")
+            }
+        }
+        .padding(10)
+        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        // 行出现即加载分集与已关联条目信息（幂等）
+        .task(id: show.id) { await online.ensureEpisodes(for: show) }
+        .task(id: "\(show.id)-subject") { await online.ensureSubject(for: show) }
+    }
+
+    private func cloudEpisodeRow(show: OnlineShow, episode: OnlineEpisode) -> some View {
+        Button {
+            playCloud(show: show, episode: episode)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "play.circle")
+                    .foregroundStyle(.tint)
+                Text(episode.title ?? "第 \(episode.number) 集")
+                    .font(.callout)
+                    .lineLimit(1)
+                if online.isWatched(episode) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Text("已看")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .padding(.leading, 54)
+        .padding(.vertical, 4)
+    }
+
+    /// 云端分集点播：经对应片源取流（缓存副本优先），成功后由外层切播放器页加载
+    private func playCloud(show: OnlineShow, episode: OnlineEpisode) {
+        Task {
+            do {
+                let target = try await online.preparePlayback(show: show, episode: episode)
+                onPlayOnline(target)
+            } catch {
+                online.statusMessage = "播放失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func expandedCloudBinding(_ show: OnlineShow) -> Binding<Bool> {
+        Binding(
+            get: { expandedCloud.contains(show.id) },
+            set: { expanded in
+                if expanded {
+                    expandedCloud.insert(show.id)
+                    // 展开时刷新已看徽章（与在线页同规则）
+                    Task { await online.refreshWatched(for: show) }
+                } else {
+                    expandedCloud.remove(show.id)
+                }
+            }
+        )
     }
 
     private func seriesRow(_ series: Series) -> some View {

@@ -65,6 +65,18 @@ struct ContentView: View {
             isFullScreen = false
             scheduleApplyFullScreenStyle(false)
         }
+        // 在线绑定 sheet 统一在根视图呈现：番库页与在线页都常驻挂载（惰性挂载），
+        // 若挂在各自页面会因监听同一个 bindTarget 而双弹
+        .sheet(
+            isPresented: Binding(
+                get: { online.bindTarget != nil },
+                set: { if !$0 { online.bindTarget = nil } }
+            )
+        ) {
+            if let show = online.bindTarget {
+                OnlineBindSheet(model: online, show: show)
+            }
+        }
     }
 
     /// 标题栏文字：播放中显示文件名，其余任何时候（番库/Bangumi/空状态）显示 NagomiAni
@@ -140,7 +152,7 @@ struct ContentView: View {
     private func page(for item: SidebarItem) -> some View {
         switch item {
         case .library:
-            LibraryPage(model: library) { url in
+            LibraryPage(model: library, online: online) { url in
                 // 防御：索引残留了磁盘上已不存在的文件（正常应在"更新"重扫时清掉）——
                 // 不再切播放页尝试播放，而是触发该目录重扫并把失效条目清掉
                 guard FileManager.default.fileExists(atPath: url.path) else {
@@ -150,7 +162,7 @@ struct ContentView: View {
                     }
                     return
                 }
-                // 从番库点播：切到播放器页并加载文件；
+                // 从番库点播本地文件：切到播放器页加载；
                 // 目录已在番库中关联 → 直接复用绑定，顶部不再提示"关联条目"
                 selection = .player
                 let series = library.series.first { $0.files.contains { $0.path == url.path } }
@@ -160,6 +172,24 @@ struct ContentView: View {
                         fromLibrary: true,
                         librarySubjectID: series?.subjectID,
                         librarySubject: series.flatMap { library.cover(for: $0) }
+                    )
+                }
+            } onPlayOnline: { playback in
+                // 从番库点播云端剧集：经对应片源取流后加载（绑定/续播/自动同步与在线页同链路）
+                selection = .player
+                Task {
+                    await model.load(
+                        url: playback.url,
+                        librarySubjectID: playback.boundSubjectID,
+                        librarySubject: playback.boundSubject,
+                        displayTitle: playback.displayTitle,
+                        resumeKey: playback.resumeKey,
+                        mediaOverride: MediaOverride(
+                            episodeNumber: playback.episodeNumber,
+                            seriesKey: playback.seriesKey
+                        ),
+                        httpHeaders: playback.httpHeaders,
+                        userAgent: playback.userAgent
                     )
                 }
             }

@@ -41,6 +41,16 @@ final class OnlineStore: ObservableObject {
     private let providers: [SourceProvider]
     private var showsLoaded = false
 
+    // MARK: - 本地缓存（StreamCache：HLS 分片 / 单文件）
+    private let cache = StreamCache()
+    /// 已完整缓存的 resumeKey 集合
+    @Published private(set) var cachedKeys: Set<String> = []
+    /// 下载中的 resumeKey → 进度（0~1，nil 表示未知如单文件下载）
+    @Published private(set) var cacheProgress: [String: Double?] = [:]
+    /// 缓存总字节数
+    @Published private(set) var cacheTotalBytes: Int64 = 0
+    private var cacheTasks: [String: Task<Void, Never>] = [:]
+
     init(providers: [SourceProvider] = [MockProvider()]) {
         self.providers = providers
     }
@@ -88,9 +98,11 @@ final class OnlineStore: ObservableObject {
         statusMessage = "正在准备「\(show.title) 第 \(episode.number) 集」的片源…"
         let source = try await provider.streamURL(for: episode)
         statusMessage = nil
+        // 已整体缓存的集直接播本地副本（HLS 为重写的本地 playlist）
+        let playURL = cache.cachedMediaURL(for: episode.resumeKey) ?? source.url
         let boundID = binding(for: episode.seriesKey)
         return OnlinePlayback(
-            url: source.url,
+            url: playURL,
             displayTitle: Self.displayTitle(show: show, episode: episode),
             seriesKey: episode.seriesKey,
             episodeNumber: episode.number,
@@ -189,6 +201,99 @@ final class OnlineStore: ObservableObject {
 
     func isWatched(_ episode: OnlineEpisode) -> Bool {
         watchedEpisodes[episode.seriesKey]?.contains(episode.number) == true
+    }
+
+    // MARK: - 缓存
+
+    enum CacheState: Equatable {
+        case notCached
+        case downloading(Double?)
+        case cached
+    }
+
+    func cacheState(for episode: OnlineEpisode) -> CacheState {
+        if let progress = cacheProgress[episode.resumeKey] {
+            return .downloading(progress)
+        }
+        if cachedKeys.contains(episode.resumeKey) {
+            return .cached
+        }
+        return .notCached
+    }
+
+    /// 启动时恢复缓存状态展示
+    func refreshCacheState() {
+        cachedKeys = cache.cachedKeys()
+        cacheTotalBytes = cache.totalBytes()
+    }
+
+    /// 手动缓存一集（HLS 走分片下载 + 本地 playlist；渐进式走整文件流式落盘）
+    func startCache(show: OnlineShow, episode: OnlineEpisode) {
+        let key = episode.resumeKey
+        guard cacheTasks[key] == nil, !cachedKeys.contains(key) else { return }
+        guard let provider = provider(id: episode.providerID) else { return }
+        let cache = cache
+        cacheProgress[key] = nil
+        let task = Task {
+            defer { cacheTasks[key] = nil }
+            do {
+                let source = try await provider.streamURL(for: episode)
+                if source.isHLS {
+                    _ = try await cache.download(
+                        playlistURL: source.url,
+                        httpHeaders: source.httpHeaders,
+                        userAgent: source.userAgent,
+                        cacheKey: key,
+                        progress: { [weak self] progress in
+                            let fraction = progress.fraction
+                            Task { @MainActor [weak self] in
+                                self?.cacheProgress[key] = fraction
+                            }
+                        }
+                    )
+                } else {
+                    _ = try await cache.downloadFile(
+                        url: source.url,
+                        httpHeaders: source.httpHeaders,
+                        userAgent: source.userAgent,
+                        cacheKey: key
+                    )
+                }
+                cachedKeys.insert(key)
+                cacheProgress[key] = nil
+                cacheTotalBytes = cache.totalBytes()
+                statusMessage = "已缓存「\(show.title) 第 \(episode.number) 集」"
+            } catch is CancellationError {
+                cacheProgress[key] = nil
+            } catch {
+                cacheProgress[key] = nil
+                statusMessage = "缓存失败：\(error.localizedDescription)"
+            }
+        }
+        cacheTasks[key] = task
+    }
+
+    func cancelCache(for episode: OnlineEpisode) {
+        cacheTasks[episode.resumeKey]?.cancel()
+    }
+
+    func removeCache(for episode: OnlineEpisode) {
+        cache.purge(cacheKey: episode.resumeKey)
+        cachedKeys.remove(episode.resumeKey)
+        cacheTotalBytes = cache.totalBytes()
+    }
+
+    func clearAllCache() {
+        cache.purgeAll()
+        cachedKeys.removeAll()
+        cacheTotalBytes = 0
+        statusMessage = "已清除全部缓存"
+    }
+
+    static func formattedBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 
     private func provider(id: String) -> SourceProvider? {

@@ -23,7 +23,10 @@ struct OnlinePage: View {
         .padding(20)
         .frame(minWidth: 520, minHeight: 480)
         .navigationTitle("在线")
-        .task { await model.loadShowsIfNeeded() }
+        .task {
+            await model.loadShowsIfNeeded()
+            model.refreshCacheState()
+        }
         .sheet(
             isPresented: Binding(
                 get: { model.bindTarget != nil },
@@ -43,6 +46,14 @@ struct OnlinePage: View {
             Text("在线")
                 .font(.title2)
             Spacer()
+            Text("缓存 \(OnlineStore.formattedBytes(model.cacheTotalBytes))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("清除全部缓存") {
+                model.clearAllCache()
+            }
+            .controlSize(.small)
+            .disabled(model.cacheTotalBytes == 0)
             if model.isPreparing || model.isLoadingShows {
                 ProgressView()
                     .controlSize(.small)
@@ -187,36 +198,87 @@ struct OnlinePage: View {
         .controlSize(.small)
     }
 
+    /// 集行：主体是播放按钮（含已看徽章），尾部是独立的缓存控制按钮（不能嵌套进播放按钮）
     private func episodeRow(show: OnlineShow, episode: OnlineEpisode) -> some View {
-        Button {
-            play(show: show, episode: episode)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "play.circle")
-                    .foregroundStyle(.tint)
-                Text(episode.title ?? "第 \(episode.number) 集")
-                    .font(.callout)
-                    .lineLimit(1)
-                if model.isWatched(episode) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                    Text("已看")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
+        HStack(spacing: 8) {
+            Button {
+                play(show: show, episode: episode)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "play.circle")
+                        .foregroundStyle(.tint)
+                    Text(episode.title ?? "第 \(episode.number) 集")
+                        .font(.callout)
+                        .lineLimit(1)
+                    if model.isWatched(episode) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                        Text("已看")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                    }
+                    if preparingEpisodeID == episode.id {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Spacer()
                 }
-                Spacer()
-                if preparingEpisodeID == episode.id {
-                    ProgressView().controlSize(.mini)
-                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            cacheControl(show: show, episode: episode)
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.primary)
         .padding(.leading, 54)
         .padding(.vertical, 4)
-        .disabled(model.isPreparing)
+    }
+
+    /// 集行尾部的缓存控制：未缓存=下载、下载中=进度+取消、已缓存=徽章+删除
+    @ViewBuilder
+    private func cacheControl(show: OnlineShow, episode: OnlineEpisode) -> some View {
+        switch model.cacheState(for: episode) {
+        case .notCached:
+            Button {
+                model.startCache(show: show, episode: episode)
+            } label: {
+                Image(systemName: "arrow.down.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .font(.system(size: 15))
+            .help("缓存本集到本地")
+        case .downloading(let fraction):
+            if let fraction {
+                Text("\(Int((fraction * 100).rounded()))%")
+                    .font(.caption2)
+                    .monospacedDigit()
+                    .foregroundStyle(.tint)
+            } else {
+                ProgressView().controlSize(.mini)
+            }
+            Button {
+                model.cancelCache(for: episode)
+            } label: {
+                Image(systemName: "xmark.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .font(.system(size: 13))
+            .help("取消缓存")
+        case .cached:
+            Text("已缓存")
+                .font(.caption2)
+                .foregroundStyle(.green)
+            Button {
+                model.removeCache(for: episode)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .font(.system(size: 13))
+            .help("删除本地缓存")
+        }
     }
 
     // MARK: - 动作

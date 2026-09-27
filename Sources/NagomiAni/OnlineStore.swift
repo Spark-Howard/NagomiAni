@@ -15,8 +15,8 @@ struct OnlinePlayback {
     let boundSubject: Subject?
 }
 
-/// 在线片源页的状态模型：汇总各 Provider 的目录，组装点播参数。
-/// 绑定/已看状态在 M2 接入（与 PlayerModel 共用 UserDefaults 绑定表）。
+/// 在线片源页的状态模型：汇总各 Provider 的目录，组装点播参数；
+/// Bangumi 绑定与已看徽章（与 PlayerModel 共用同一张 UserDefaults 绑定表）。
 @MainActor
 final class OnlineStore: ObservableObject {
     @Published private(set) var shows: [OnlineShow] = []
@@ -25,6 +25,18 @@ final class OnlineStore: ObservableObject {
     @Published var statusMessage: String?
     @Published private(set) var isLoadingShows = false
     @Published private(set) var isPreparing = false
+
+    // MARK: - Bangumi 绑定与已看徽章
+    /// 合成 seriesKey（"online:<provider>:<showID>"）直通 PlayerModel 的 markWatched 自动同步
+    /// subjectID → Subject（已关联条目的封面/名称展示）
+    @Published private(set) var subjects: [Int: Subject] = [:]
+    /// seriesKey → 已看集号集合（来自 Bangumi 我的单集收藏）
+    @Published private(set) var watchedEpisodes: [String: Set<Int>] = [:]
+    @Published private(set) var isLoadingWatched: Set<String> = []
+    @Published var searchResults: [Subject] = []
+    @Published var isSearching = false
+    /// 当前绑定 sheet 的目标番（nil = 关闭）
+    @Published var bindTarget: OnlineShow?
 
     private let providers: [SourceProvider]
     private var showsLoaded = false
@@ -65,7 +77,8 @@ final class OnlineStore: ObservableObject {
 
     // MARK: - 点播
 
-    /// 取流 URL 并组装播放参数（mock 首次播放要生成样例视频，可能耗时几十秒）
+    /// 取流 URL 并组装播放参数（mock 首次播放要生成样例视频，可能耗时几十秒）。
+    /// 已绑定的番会带上 Bangumi 条目，PlayerModel 经 bindLocal 复用绑定保证播完自动同步。
     func preparePlayback(show: OnlineShow, episode: OnlineEpisode) async throws -> OnlinePlayback {
         guard let provider = provider(id: episode.providerID) else {
             throw OnlineStoreError.unknownProvider
@@ -75,6 +88,7 @@ final class OnlineStore: ObservableObject {
         statusMessage = "正在准备「\(show.title) 第 \(episode.number) 集」的片源…"
         let source = try await provider.streamURL(for: episode)
         statusMessage = nil
+        let boundID = binding(for: episode.seriesKey)
         return OnlinePlayback(
             url: source.url,
             displayTitle: Self.displayTitle(show: show, episode: episode),
@@ -83,9 +97,98 @@ final class OnlineStore: ObservableObject {
             resumeKey: episode.resumeKey,
             httpHeaders: source.httpHeaders,
             userAgent: source.userAgent,
-            boundSubjectID: nil,
-            boundSubject: nil
+            boundSubjectID: boundID,
+            boundSubject: boundID.flatMap { subjects[$0] }
         )
+    }
+
+    // MARK: - 绑定（UserDefaults 与 PlayerModel 同一张表）
+
+    func binding(for seriesKey: String) -> Int? {
+        (UserDefaults.standard.dictionary(forKey: PlayerModel.bindingsKey) as? [String: Int])?[seriesKey]
+    }
+
+    private func boundName(for seriesKey: String) -> String? {
+        (UserDefaults.standard.dictionary(forKey: PlayerModel.boundNamesKey) as? [String: String])?[seriesKey]
+    }
+
+    func bind(subject: Subject, to show: OnlineShow) {
+        let seriesKey = show.seriesKey
+        var ids = UserDefaults.standard.dictionary(forKey: PlayerModel.bindingsKey) as? [String: Int] ?? [:]
+        var names = UserDefaults.standard.dictionary(forKey: PlayerModel.boundNamesKey) as? [String: String] ?? [:]
+        ids[seriesKey] = subject.id
+        names[seriesKey] = subject.displayName.isEmpty ? "未命名" : subject.displayName
+        UserDefaults.standard.set(ids, forKey: PlayerModel.bindingsKey)
+        UserDefaults.standard.set(names, forKey: PlayerModel.boundNamesKey)
+        subjects[subject.id] = subject
+        bindTarget = nil
+        statusMessage = "已关联「\(names[seriesKey] ?? "")」，本系列播完自动同步"
+        Task { await refreshWatched(for: show) }
+    }
+
+    func unbind(for show: OnlineShow) {
+        let seriesKey = show.seriesKey
+        var ids = UserDefaults.standard.dictionary(forKey: PlayerModel.bindingsKey) as? [String: Int] ?? [:]
+        var names = UserDefaults.standard.dictionary(forKey: PlayerModel.boundNamesKey) as? [String: String] ?? [:]
+        ids.removeValue(forKey: seriesKey)
+        names.removeValue(forKey: seriesKey)
+        UserDefaults.standard.set(ids, forKey: PlayerModel.bindingsKey)
+        UserDefaults.standard.set(names, forKey: PlayerModel.boundNamesKey)
+        watchedEpisodes[seriesKey] = nil
+        statusMessage = "已解除关联"
+    }
+
+    // MARK: - 搜索（绑定 sheet 用）
+
+    func search(keyword: String) async {
+        guard let client = await BangumiSession.makeClient() else {
+            statusMessage = "未登录 Bangumi，无法搜索（请先在「聊天」页登录）"
+            return
+        }
+        isSearching = true
+        defer { isSearching = false }
+        do {
+            searchResults = try await client.searchSubjects(keyword: keyword, limit: 20).data
+        } catch {
+            searchResults = []
+            statusMessage = "搜索失败：\(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - 已看徽章与条目展示
+
+    /// 已关联条目的封面/名称（未缓存时静默补拉）
+    func ensureSubject(for show: OnlineShow) async {
+        guard let id = binding(for: show.seriesKey), subjects[id] == nil else { return }
+        guard let client = await BangumiSession.makeClient() else { return }
+        if let subject = try? await client.subject(id: id) {
+            subjects[id] = subject
+        }
+    }
+
+    /// 拉取该系列的已看集号（Bangumi 我的单集收藏；未登录/失败静默跳过）
+    func refreshWatched(for show: OnlineShow) async {
+        guard let id = binding(for: show.seriesKey) else { return }
+        guard !isLoadingWatched.contains(show.id) else { return }
+        isLoadingWatched.insert(show.id)
+        defer { isLoadingWatched.remove(show.id) }
+        guard let client = await BangumiSession.makeClient() else { return }
+        do {
+            let page = try await client.myEpisodeCollections(subjectID: id)
+            var watched = Set<Int>()
+            for item in page.data where item.type == .watched {
+                if let sort = item.episode?.sort {
+                    watched.insert(Int(sort.rounded()))
+                }
+            }
+            watchedEpisodes[show.seriesKey] = watched
+        } catch {
+            // 徽章拉取失败不影响播放，静默降级
+        }
+    }
+
+    func isWatched(_ episode: OnlineEpisode) -> Bool {
+        watchedEpisodes[episode.seriesKey]?.contains(episode.number) == true
     }
 
     private func provider(id: String) -> SourceProvider? {

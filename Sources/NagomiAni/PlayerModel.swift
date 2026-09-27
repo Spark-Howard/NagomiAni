@@ -36,8 +36,10 @@ final class PlayerModel: ObservableObject {
     let engine = MPVPlaybackEngine()
 
     private var currentMedia: (episodeNumber: Int?, seriesKey: String)?
-    private static let bindingsKey = "bangumi.bindings"       // [seriesKey: subjectID]
-    private static let boundNamesKey = "bangumi.boundNames"   // [seriesKey: 显示名]
+    // 绑定表与 OnlineStore（在线页）共用：合成 seriesKey "online:…" 存同一张表，
+    // 在线播完的 markWatched 自动同步才能找到 subjectID
+    static let bindingsKey = "bangumi.bindings"       // [seriesKey: subjectID]
+    static let boundNamesKey = "bangumi.boundNames"   // [seriesKey: 显示名]
 
     // 断点续播（按文件路径记录，resume.json 持久化）
     private let resumeStore = PlaybackResumeStore()

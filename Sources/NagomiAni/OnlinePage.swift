@@ -24,6 +24,16 @@ struct OnlinePage: View {
         .frame(minWidth: 520, minHeight: 480)
         .navigationTitle("在线")
         .task { await model.loadShowsIfNeeded() }
+        .sheet(
+            isPresented: Binding(
+                get: { model.bindTarget != nil },
+                set: { if !$0 { model.bindTarget = nil } }
+            )
+        ) {
+            if let show = model.bindTarget {
+                OnlineBindSheet(model: model, show: show)
+            }
+        }
     }
 
     // MARK: - 视图
@@ -87,28 +97,94 @@ struct OnlinePage: View {
             }
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: "play.tv")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.tint)
-                    .frame(width: 44, height: 60)
-                    .background(Color.gray.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                coverView(show)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(show.title)
                         .font(.headline)
                         .lineLimit(1)
-                    if let subtitle = show.subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        bindBadge(show)
+                        if let subject = boundSubject(show) {
+                            Text(subject.displayName)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        } else if let subtitle = show.subtitle, !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 Spacer()
+                bindButton(for: show)
+                if model.binding(for: show.seriesKey) != nil {
+                    Button {
+                        model.unbind(for: show)
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 15))
+                    .help("解除关联")
+                }
             }
         }
         .padding(10)
         .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
         // 行出现即加载集列表（幂等）
         .task(id: show.id) { await model.ensureEpisodes(for: show) }
+        // 行出现时补拉已关联条目的封面/名称
+        .task(id: "\(show.id)-subject") { await model.ensureSubject(for: show) }
+    }
+
+    /// 已关联显示 Bangumi 封面，否则用占位图标
+    @ViewBuilder
+    private func coverView(_ show: OnlineShow) -> some View {
+        if let subject = boundSubject(show),
+           let url = SearchPage.imageURL(subject.images?.common) {
+            CoverImageView(url: url, cornerRadius: 4)
+                .frame(width: 44, height: 60)
+        } else {
+            Image(systemName: "play.tv")
+                .font(.system(size: 20))
+                .foregroundStyle(.tint)
+                .frame(width: 44, height: 60)
+                .background(Color.gray.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    private func boundSubject(_ show: OnlineShow) -> Subject? {
+        model.binding(for: show.seriesKey).flatMap { model.subjects[$0] }
+    }
+
+    @ViewBuilder
+    private func bindBadge(_ show: OnlineShow) -> some View {
+        if model.binding(for: show.seriesKey) != nil {
+            Text("已关联")
+                .font(.caption2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.15), in: Capsule())
+                .foregroundStyle(.green)
+        } else {
+            Text("未关联")
+                .font(.caption2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.gray.opacity(0.15), in: Capsule())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func bindButton(for show: OnlineShow) -> some View {
+        Button {
+            model.bindTarget = show
+        } label: {
+            Text(model.binding(for: show.seriesKey) != nil ? "更换" : "关联")
+        }
+        .controlSize(.small)
     }
 
     private func episodeRow(show: OnlineShow, episode: OnlineEpisode) -> some View {
@@ -121,6 +197,14 @@ struct OnlinePage: View {
                 Text(episode.title ?? "第 \(episode.number) 集")
                     .font(.callout)
                     .lineLimit(1)
+                if model.isWatched(episode) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Text("已看")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                }
                 Spacer()
                 if preparingEpisodeID == episode.id {
                     ProgressView().controlSize(.mini)
@@ -156,10 +240,103 @@ struct OnlinePage: View {
             set: { expanded in
                 if expanded {
                     expandedShows.insert(show.id)
+                    // 展开时刷新已看徽章（绑定可能刚在别处同步过）
+                    Task { await model.refreshWatched(for: show) }
                 } else {
                     expandedShows.remove(show.id)
                 }
             }
         )
+    }
+}
+
+/// 在线番的 Bangumi 绑定 sheet：打开即按番名自动搜索，点选确认；也可手动改关键词
+struct OnlineBindSheet: View {
+    @ObservedObject var model: OnlineStore
+    let show: OnlineShow
+
+    @State private var keyword = ""
+    @State private var hasSearched = false
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("为「\(show.title)」关联 Bangumi 条目")
+                .font(.headline)
+                .lineLimit(1)
+
+            HStack {
+                TextField("搜索条目", text: $keyword)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { search() }
+                Button("搜索") { search() }
+                    .disabled(keyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearching)
+            }
+
+            if model.isSearching {
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.vertical, 12)
+            } else if hasSearched {
+                if model.searchResults.isEmpty {
+                    Text("没有找到相关条目，换个关键词试试")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 12)
+                } else {
+                    List(model.searchResults) { subject in
+                        Button {
+                            model.bind(subject: subject, to: show)
+                            dismiss()
+                        } label: {
+                            subjectRow(subject)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            } else {
+                Text("正在按番名搜索…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            }
+
+            if let message = model.statusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+        }
+        .padding(16)
+        .frame(width: 460, height: 460)
+        .onAppear {
+            // 打开即按番名自动搜索（自动匹配只给候选，确认由用户点选——与番库同原则）
+            keyword = show.title
+            search()
+        }
+    }
+
+    private func subjectRow(_ subject: Subject) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(subject.displayName.isEmpty ? "—" : subject.displayName)
+                    .font(.body)
+                Text(subject.name ?? "")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("共 \(subject.episodeCount ?? 0) 集")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func search() {
+        hasSearched = true
+        Task { await model.search(keyword: keyword) }
     }
 }

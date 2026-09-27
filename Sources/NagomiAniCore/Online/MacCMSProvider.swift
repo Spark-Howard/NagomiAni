@@ -29,6 +29,8 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
 
     /// 归一化后的完整 API 端点（如 https://host/api.php/provide/vod/）
     public let apiBase: URL
+    /// 自定义显示名（内置默认源显示"量子资源"等友好名称；nil 用域名）
+    public let customName: String?
     private let session: URLSession
 
     /// - Parameter base: 用户粘贴的地址（站点首页 / 任意路径 / 完整 API 地址均可）
@@ -37,8 +39,9 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
         self.init(apiBase: base)
     }
 
-    public init(apiBase: URL) {
+    public init(apiBase: URL, displayName customName: String? = nil) {
         self.apiBase = apiBase
+        self.customName = customName
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 60
@@ -48,7 +51,7 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
     // MARK: - SourceProvider
 
     public var id: String { Self.providerID(for: apiBase) }
-    public var displayName: String { apiBase.host ?? "资源站" }
+    public var displayName: String { customName ?? (apiBase.host ?? "资源站") }
 
     /// providerID = 域名（进合成 seriesKey，上线后域名变更会丢绑定/续播记录）
     public static func providerID(for base: URL) -> String {

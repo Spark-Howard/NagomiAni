@@ -34,7 +34,23 @@ final class OnlineStore: ObservableObject {
     // MARK: - 资源站管理与跨站搜索
 
     static let sitesKey = "online.maccms.sites"
-    /// 已添加的苹果CMS 资源站（归一化 API 地址，UserDefaults 持久化；仓库不内置任何站点）
+
+    /// 内置默认资源站（2026-09-27 应用户要求内置；均为 senfun.in 等聚合站实际引用的公开上游采集接口，已实测可用：
+    /// 量子/极速/爱坤经 senfun 播放页 m3u8 域名反向确认，暴风为额外验证的大型通用站）。
+    /// 用户不可移除内置源，但可继续自行添加；id 取域名进合成 seriesKey，勿改地址。
+    struct DefaultSite {
+        let name: String
+        let base: String
+    }
+
+    static let defaultSites: [DefaultSite] = [
+        DefaultSite(name: "量子资源", base: "https://cj.lziapi.com"),
+        DefaultSite(name: "极速资源", base: "https://jszyapi.com"),
+        DefaultSite(name: "爱坤资源", base: "https://ikunzyapi.com"),
+        DefaultSite(name: "暴风资源", base: "https://bfzyapi.com"),
+    ]
+
+    /// 用户添加的苹果CMS 资源站（归一化 API 地址，UserDefaults 持久化）
     @Published private(set) var sites: [String] = []
     /// 非 nil 时列表切换为搜索结果（nil = 浏览默认目录）
     @Published private(set) var onlineSearchResults: [OnlineShow]?
@@ -46,23 +62,35 @@ final class OnlineStore: ObservableObject {
         rebuildProviders()
     }
 
-    /// Mock 样例源永远保留（全链路演示/兜底），后接用户添加的资源站
+    /// Mock 样例源永远保留（全链路演示/兜底），后接内置默认源与用户添加的资源站
     private func rebuildProviders() {
         var list: [SourceProvider] = [MockProvider()]
+        let defaultProviders = Self.defaultSites.compactMap { site -> SourceProvider? in
+            guard let provider = MacCMSProvider(base: site.base) else { return nil }
+            return MacCMSProvider(apiBase: provider.apiBase, displayName: site.name)
+        }
+        list.append(contentsOf: defaultProviders)
+        let defaultIDs = Set(defaultProviders.map(\.id))
         for site in sites {
-            if let provider = MacCMSProvider(base: site) {
-                list.append(provider)
-            }
+            guard let provider = MacCMSProvider(base: site) else { continue }
+            guard !defaultIDs.contains(provider.id) else { continue } // 与内置源重复的跳过
+            list.append(provider)
         }
         providers = list
     }
 
+    /// 添加用户自定义资源站（与内置源重复的地址会被拒绝）
     func addSite(_ raw: String) {
         guard let provider = MacCMSProvider(base: raw) else {
             statusMessage = "无法识别的站点地址：\(raw)"
             return
         }
         let normalized = provider.apiBase.absoluteString
+        let defaultNormalized = Set(Self.defaultSites.compactMap { MacCMSProvider(base: $0.base)?.apiBase.absoluteString })
+        if defaultNormalized.contains(normalized) {
+            statusMessage = "该站点已内置为默认片源"
+            return
+        }
         if sites.contains(normalized) {
             statusMessage = "该站点已添加：\(provider.displayName)"
             return

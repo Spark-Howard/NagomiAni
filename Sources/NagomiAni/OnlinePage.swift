@@ -117,7 +117,7 @@ struct OnlinePage: View {
                 .foregroundStyle(.secondary)
             Text(model.isLoadingShows
                  ? "正在加载片源…"
-                 : "点「添加片源」粘贴苹果CMS 资源站地址\n或先用内置样例番组体验完整链路")
+                 : "没有加载到任何内容\n可在「添加片源」里检查资源站或稍后重试")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
@@ -401,44 +401,63 @@ struct OnlineSourceSheet: View {
 
             Divider()
 
-            if model.sites.isEmpty {
-                Text("尚未添加资源站。粘贴站点首页地址即可，会自动拼接采集接口路径 /api.php/provide/vod/")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("已添加 \(model.sites.count) 个站点")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                List {
-                    ForEach(model.sites, id: \.self) { site in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(URL(string: site)?.host ?? site)
-                                    .font(.body)
-                                Text(site)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+            Text("内置片源（\(OnlineStore.defaultSites.count) 个，不可移除）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            List {
+                ForEach(OnlineStore.defaultSites, id: \.base) { site in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(site.name)
+                                .font(.body)
+                            Text(URL(string: site.base)?.host ?? site.base)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Spacer()
+                        Text("内置")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.blue)
+                    }
+                }
+
+                if !model.sites.isEmpty {
+                    Section("手动添加（\(model.sites.count) 个）") {
+                        ForEach(model.sites, id: \.self) { site in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(URL(string: site)?.host ?? site)
+                                        .font(.body)
+                                    Text(site)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                                Spacer()
+                                Button {
+                                    model.removeSite(site)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .help("移除该站点")
                             }
-                            Spacer()
-                            Button {
-                                model.removeSite(site)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(.secondary)
-                            .help("移除该站点")
                         }
                     }
                 }
-                .listStyle(.inset)
             }
+            .listStyle(.inset)
 
             Spacer()
 
-            Text("说明：支持苹果CMS V10 采集接口（/api.php/provide/vod/）。仓库不内置任何站点，请自行添加并遵守站点条款；播放行为等同直接打开视频地址。")
+            Text("说明：内置源为公开采集接口的苹果CMS 资源站；也可粘贴其它站点首页地址自动拼接接口路径。内容均来自互联网公开接口，请遵守站点条款与当地法规。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             HStack {

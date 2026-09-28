@@ -53,9 +53,9 @@ struct PlayerView: View {
             hiddenOpenShortcut
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 空状态用系统背景色（与番库/Bangumi 页一致，切换不晃眼）；
-        // 播放中保持黑色（视频画面即黑色，黑边正常）
-        .background(model.fileName == nil ? Color(nsColor: .windowBackgroundColor) : Color.black)
+        // 空状态跟随主题（淡粉底，与其它页一致）；播放中保持纯黑
+        // （mpv 画面渲染/信箱黑边是功能性的，黑色才不干扰观影）
+        .background(model.fileName == nil ? NagomiTheme.pageBackground : Color.black)
         .contentShape(Rectangle())
         .onTapGesture {
             model.togglePlayPause()

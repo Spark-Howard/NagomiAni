@@ -40,6 +40,12 @@ struct ContentView: View {
         // 避免切换页面时 UI 上下跳动（"打开文件"按钮已移入播放器顶部栏）
         .onAppear {
             updateWindowTitle()
+            // 主题化标题条：标题条透明 + 窗底用主题色（粉色透出为标题条背景）；
+            // 不加 .fullSizeContentView——内容不伸入标题条，布局零改动
+            if let window = NSApp.windows.first(where: { $0.isVisible }) {
+                window.titlebarAppearsTransparent = true
+                window.backgroundColor = NagomiTheme.windowNSBackground
+            }
             // 自动连播：注入"下一集"解析（本地番库按文件顺序、云端片源按分集号）
             model.nextEpisodeResolver = { context in
                 if context.isOnline {
@@ -171,11 +177,13 @@ struct ContentView: View {
         }
     }
 
-    /// 全屏时让内容铺满整个屏幕（标题栏区域透明化、无白框），
-    /// 标题栏与三色按钮交给系统全屏机制：鼠标移顶呼出、移开立即收回
+    /// 全屏时让内容铺满整个屏幕（标题栏与三色按钮交给系统全屏机制：
+    /// 鼠标移顶呼出、移开立即收回）。
+    /// 标题条透明是**永久状态**（窗口化也透明——透出主题色窗底，标题条随主题）；
+    /// 全屏只增删 .fullSizeContentView。
     private func applyFullScreenStyle(_ full: Bool) {
         guard let window = NSApp.keyWindow else { return }
-        window.titlebarAppearsTransparent = full
+        window.titlebarAppearsTransparent = true
         if full {
             window.styleMask.insert(.fullSizeContentView)
         } else {

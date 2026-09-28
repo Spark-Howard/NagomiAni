@@ -35,6 +35,13 @@ enum NagomiTheme {
         dark: NSColor(srgbRed: 0.208, green: 0.157, blue: 0.176, alpha: 1) // #35282D
     )
 
+    /// 窗口背景（标题条透明化后透出，整窗同主题）；供 NSWindow.backgroundColor 使用
+    static let windowNSBackground = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.125, green: 0.094, blue: 0.106, alpha: 1) // #20181B
+            : NSColor(srgbRed: 1.0, green: 0.969, blue: 0.976, alpha: 1) // #FFF7F9
+    }
+
     /// 浅/深双色动态颜色（跟随系统外观）
     private static func dynamic(light: NSColor, dark: NSColor) -> Color {
         Color(NSColor(name: nil) { appearance in

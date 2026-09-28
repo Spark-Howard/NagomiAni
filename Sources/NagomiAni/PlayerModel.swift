@@ -18,7 +18,11 @@ struct AutoNextContext {
     let isOnline: Bool
 }
 
-/// 播放器的 UI 状态模型：桥接 PlaybackEngine 与 SwiftUI
+/// 播放器的 UI 状态模型：桥接 PlaybackEngine 与 SwiftUI。
+/// @MainActor：引擎的 delegate 回调本身就在主线程（见 PlaybackEngineDelegate 契约），
+/// 显式标注保证所有 @Published 变更与内部 Task 都在主线程——
+/// 连播提示/换线/自动下一集等异步链路不得在后台线程发布 UI 状态。
+@MainActor
 final class PlayerModel: ObservableObject {
     @Published private(set) var state: PlaybackState = .idle
     @Published private(set) var currentTime: Double = 0
@@ -93,10 +97,13 @@ final class PlayerModel: ObservableObject {
     init() {
         engine.delegate = self
         // 退出前把最后位置落盘（播放中强杀进程最多丢 5s，可接受）
+        // queue: .main 保证闭包在主线程执行；assumeIsolated 显式声明以满足 @MainActor
         terminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.flushResume(force: true)
+            MainActor.assumeIsolated {
+                self?.flushResume(force: true)
+            }
         }
     }
 
@@ -185,7 +192,6 @@ final class PlayerModel: ObservableObject {
         } else {
             activeOnline = nil
         }
-        routeCount = mediaOverride != nil ? (routes?.count ?? 1) : 0
         routeIndex = 0
 
         // 线路依次尝试：首选失败自动换下一条（全部失败才放弃）
@@ -200,6 +206,8 @@ final class PlayerModel: ObservableObject {
                 routeURLs = list
             }
         }
+        // 菜单项以实际可用的线路数为准（无效 URL 在 compactMap 中被剔除）
+        routeCount = mediaOverride != nil ? routeURLs.count : 0
         do {
             for (index, attempt) in routeURLs.enumerated() {
                 do {
@@ -589,7 +597,9 @@ final class PlayerModel: ObservableObject {
 
 // MARK: - PlaybackEngineDelegate
 
-extension PlayerModel: PlaybackEngineDelegate {
+// 引擎保证 delegate 回调在主线程（见 PlaybackEngineDelegate 注释），
+// 与 @MainActor 的 PlayerModel 匹配；@preconcurrency 告知编译器该契约
+extension PlayerModel: @preconcurrency PlaybackEngineDelegate {
     func playbackEngine(_ engine: PlaybackEngine, didUpdateTime time: Double) {
         if !isSeeking {
             currentTime = time
@@ -627,8 +637,10 @@ extension PlayerModel: PlaybackEngineDelegate {
         Task { await offerNextEpisodeIfAvailable() }
     }
 
-    /// 手动切换线路：保留当前播放位置重载（播放中途画质/速度差时用）
+    /// 手动切换线路：保留当前播放位置重载（播放中途画质/速度差时用）。
+    /// 加载中禁止换线：引擎同时只挂一个 load 续接，重入会令首次加载的续接泄漏（永久转圈）。
     func switchRoute(to index: Int) {
+        guard state == .playing || state == .paused || state == .ready else { return }
         guard let active = activeOnline, active.routes.indices.contains(index), index != routeIndex else { return }
         guard let target = URL(string: active.routes[index]) else { return }
         let resumeAt = max(currentTime, 0)

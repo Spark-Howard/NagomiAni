@@ -347,6 +347,7 @@ struct OnlinePage: View {
     // MARK: - 动作
 
     private func play(show: OnlineShow, episode: OnlineEpisode) {
+        guard preparingEpisodeID == nil else { return } // 上一次取流还没完成，忽略连点
         preparingEpisodeID = episode.id
         Task {
             defer { preparingEpisodeID = nil }

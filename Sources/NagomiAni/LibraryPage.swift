@@ -337,6 +337,7 @@ struct LibraryPage: View {
 
     /// 云端分集点播：经对应片源取流（缓存副本优先），成功后由外层切播放器页加载
     private func playCloud(show: OnlineShow, episode: OnlineEpisode) {
+        guard !online.isPreparing else { return } // 取流进行中，忽略连点
         Task {
             do {
                 let target = try await online.preparePlayback(show: show, episode: episode)

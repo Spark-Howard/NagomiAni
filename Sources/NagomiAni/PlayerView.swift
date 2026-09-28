@@ -319,8 +319,8 @@ struct PlayerView: View {
 
                 audioMenu
                 subtitleMenu
-                // 线路切换（在线多线路时显示；播放中换源保留当前进度）
-                if model.routeCount > 1 {
+                // 线路切换（在线多线路且不在加载中时显示；播放中换源保留当前进度）
+                if model.routeCount > 1, !model.isLoading {
                     routeMenu
                 }
                 // 连播提示开关（95% 同步看完后弹"看下一集"，点允许才切换）

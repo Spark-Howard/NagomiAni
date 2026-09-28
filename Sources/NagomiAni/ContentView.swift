@@ -115,15 +115,19 @@ struct ContentView: View {
             if item.key.hasPrefix("online:") {
                 // 合成键 "online:provider:showID:number" → 番库收藏里的云端番
                 let parts = item.key.dropFirst("online:".count).split(separator: ":").map(String.init)
-                guard parts.count == 3, let number = Int(parts[2]),
-                      let entry = online.libraryEntries.first(where: {
-                          $0.providerID == parts[0] && $0.showID == parts[1]
-                      }) else { return nil }
-                let show = entry.asShow
+                guard parts.count == 3, let number = Int(parts[2]) else { return nil }
+                // 优先番库收藏（有标题），否则回退到本会话见过的番（搜索结果点播的场景）
+                // resume 键 = seriesKey + ":集号"，去掉尾部即 seriesKey
+                let seriesKey = String(item.key.dropLast(":\(number)".count))
+                let show = online.knownShow(forSeriesKey: seriesKey)
+                    ?? online.libraryEntries.first(where: {
+                        $0.providerID == parts[0] && $0.showID == parts[1]
+                    })?.asShow
+                guard let show else { return nil }
                 let episode = OnlineEpisode(providerID: show.providerID, showID: show.showID, number: number)
                 return ContinueWatchingItem(
                     id: item.key,
-                    title: entry.title,
+                    title: show.title,
                     subtitle: "第 \(number) 集 · 云端",
                     progress: progress,
                     updatedAt: item.updatedAt,

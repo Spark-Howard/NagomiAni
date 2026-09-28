@@ -35,6 +35,8 @@ final class OnlineStore: ObservableObject {
 
     private(set) var providers: [SourceProvider] = []
     private var showsLoaded = false
+    /// 会话内见过的番注册表（seriesKey → show）：搜索结果点播后连播/继续观看依赖它
+    private var knownShows: [String: OnlineShow] = [:]
 
     // MARK: - 资源站管理与跨站搜索
 
@@ -82,6 +84,7 @@ final class OnlineStore: ObservableObject {
     }
 
     func addToLibrary(_ show: OnlineShow) {
+        registerKnownShows([show])
         guard !isInLibrary(show) else { return }
         libraryEntries.append(OnlineLibraryEntry(show: show))
         saveLibraryEntries()
@@ -170,6 +173,7 @@ final class OnlineStore: ObservableObject {
             do {
                 let found = try await provider.search(keyword: trimmed)
                 guard generation == searchGeneration else { return } // 已被新搜索取代
+                registerKnownShows(found)
                 results.append(contentsOf: found)
                 onlineSearchResults = results
             } catch {
@@ -336,6 +340,7 @@ final class OnlineStore: ObservableObject {
             }
         }
         shows = all
+        registerKnownShows(all)
         showsLoaded = true
     }
 
@@ -343,6 +348,7 @@ final class OnlineStore: ObservableObject {
     func ensureEpisodes(for show: OnlineShow) async {
         guard episodes[show.id] == nil else { return }
         guard let provider = provider(id: show.providerID) else { return }
+        registerKnownShows([show])
         do {
             episodes[show.id] = try await provider.episodes(for: show.showID)
         } catch {
@@ -361,6 +367,7 @@ final class OnlineStore: ObservableObject {
         }
         isPreparing = true
         defer { isPreparing = false }
+        registerKnownShows([show])
         statusMessage = "正在准备「\(show.title) 第 \(episode.number) 集」的片源…"
         let source = try await provider.streamURL(for: episode)
         statusMessage = nil
@@ -434,9 +441,22 @@ final class OnlineStore: ObservableObject {
         return try await preparePlayback(show: show, episode: next)
     }
 
-    /// seriesKey 反查番（目录与云端番库收藏都在找）
+    /// seriesKey 反查番：已知注册表（含搜索结果里出现过的）→ 目录 → 番库收藏。
+    /// 搜索结果直接点播的番不在目录列表里，没有注册表的话连播/继续观看会找不到它
     private func show(forSeriesKey seriesKey: String) -> OnlineShow? {
-        (shows + libraryEntries.map(\.asShow)).first { $0.seriesKey == seriesKey }
+        if let known = knownShows[seriesKey] { return known }
+        return (shows + libraryEntries.map(\.asShow)).first { $0.seriesKey == seriesKey }
+    }
+
+    /// 本会话内见过的所有番（目录/搜索结果/点播/收藏），seriesKey → OnlineShow
+    func knownShow(forSeriesKey seriesKey: String) -> OnlineShow? {
+        knownShows[seriesKey]
+    }
+
+    private func registerKnownShows(_ newShows: [OnlineShow]) {
+        for show in newShows {
+            knownShows[show.seriesKey] = show
+        }
     }
 
     /// 播放器顶部/窗口标题统一显示的标题

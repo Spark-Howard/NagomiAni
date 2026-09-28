@@ -257,13 +257,8 @@ struct PlayerView: View {
                     model.acceptNextEpisode()
                 } label: {
                     Text("看下一集")
-                        .font(.callout)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 4)
-                        .background(NagomiTheme.accent, in: Capsule())
-                        .foregroundStyle(.white)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(NagomiPrimaryButtonStyle())
                 .help("切换到下一集")
                 Button {
                     model.dismissNextEpisodeOffer()
@@ -294,6 +289,7 @@ struct PlayerView: View {
                         .font(.title2)
                 }
                 .buttonStyle(.plain)
+                .nagomiHoverHighlight(Color.white.opacity(0.14), in: Circle())
 
                 Text(model.formattedDisplayTime)
                     .monospacedDigit()
@@ -337,6 +333,7 @@ struct PlayerView: View {
                         .foregroundStyle(model.autoPlayNextEnabled ? NagomiTheme.accent : .white)
                 }
                 .buttonStyle(.plain)
+                .nagomiHoverHighlight(Color.white.opacity(0.14), in: Circle())
                 .help(model.autoPlayNextEnabled ? "看完提示连播：开（点击关闭）" : "看完提示连播：关（点击开启）")
                 Button {
                     toggleFullScreen()
@@ -348,6 +345,7 @@ struct PlayerView: View {
                         .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
+                .nagomiHoverHighlight(Color.white.opacity(0.14), in: Circle())
                 .help(isFullScreen ? "退出全屏" : "进入全屏")
             }
             .padding(.horizontal, 16)
@@ -380,6 +378,7 @@ struct PlayerView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .nagomiHoverHighlight(Color.white.opacity(0.14), in: Circle())
         .help("切换播放线路")
     }
 
@@ -411,6 +410,7 @@ struct PlayerView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .nagomiHoverHighlight(Color.white.opacity(0.14), in: Circle())
         .help("音轨")
     }
 
@@ -470,6 +470,7 @@ struct PlayerView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .nagomiHoverHighlight(Color.white.opacity(0.14), in: Circle())
         .help("字幕")
     }
 

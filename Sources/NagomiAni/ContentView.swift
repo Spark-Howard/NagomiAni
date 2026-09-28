@@ -321,12 +321,17 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 4) {
             ForEach(SidebarItem.allCases) { item in
-                HStack(spacing: 8) {
+                HStack(spacing: 9) {
                     Image(systemName: item.icon)
-                        .font(.system(size: 14))
-                        .frame(width: 20)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(selection == item ? NagomiTheme.accent : .secondary)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            selection == item ? NagomiTheme.accentSoft : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 7)
+                        )
                     Text(item.title)
-                        .font(.system(size: 13))
+                        .font(.system(size: 13, weight: selection == item ? .medium : .regular))
                     Spacer()
                 }
                 .padding(.horizontal, 10)

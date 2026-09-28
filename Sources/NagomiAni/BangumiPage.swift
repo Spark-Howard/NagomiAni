@@ -246,7 +246,8 @@ struct BangumiPage: View {
                     .foregroundStyle(.tertiary)
             }
             .padding(8)
-            .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
+            .nagomiCard(cornerRadius: 8)
+.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

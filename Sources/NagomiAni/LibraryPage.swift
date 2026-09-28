@@ -97,7 +97,7 @@ struct LibraryPage: View {
             } label: {
                 Label("添加目录", systemImage: "folder.badge.plus")
             }
-            .controlSize(.large)
+            .buttonStyle(NagomiSecondaryButtonStyle())
         }
     }
 
@@ -113,8 +113,10 @@ struct LibraryPage: View {
     private var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: "books.vertical")
-                .font(.system(size: 56))
-                .foregroundStyle(NagomiTheme.accent.opacity(0.5))
+                .font(.system(size: 42, weight: .medium))
+                .foregroundStyle(NagomiTheme.accent)
+                .frame(width: 92, height: 92)
+                .background(NagomiTheme.accentSoft, in: Circle())
             Text("导入本地动漫目录，或在「在线」页把剧集加入番库\n这里会按「番」聚合显示并关联 Bangumi 条目")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -206,7 +208,8 @@ struct LibraryPage: View {
             }
             .padding(10)
             .frame(width: 210, alignment: .leading)
-            .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
+            .nagomiCard(cornerRadius: 8)
+.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -214,15 +217,7 @@ struct LibraryPage: View {
     }
 
     private func sectionHeader(_ title: String, systemImage: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            Text(title)
-                .font(.title3)
-            Spacer()
-        }
-        .padding(.top, 6)
+        NagomiSectionHeader(title: title, systemImage: systemImage)
     }
 
     private func cloudRow(_ entry: OnlineLibraryEntry) -> some View {
@@ -259,20 +254,10 @@ struct LibraryPage: View {
                         .font(.headline)
                         .lineLimit(1)
                     HStack(spacing: 6) {
-                        Text("云端")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(NagomiTheme.accentSoft, in: Capsule())
-                            .foregroundStyle(NagomiTheme.accent)
+                        NagomiBadge(text: "云端", foreground: NagomiTheme.accent, background: NagomiTheme.accentSoft)
                         // 拉取式更新提醒：展开时刷新分集并清零，收起后出新集会显示
                         if let newCount = online.newEpisodeCount(for: show) {
-                            Text("新集 \(newCount)")
-                                .font(.caption2)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.orange.opacity(0.15), in: Capsule())
-                                .foregroundStyle(.orange)
+                            NagomiBadge(text: "新集 \(newCount)", foreground: .orange, background: Color.orange.opacity(0.15))
                         }
                         Text(online.binding(for: show.seriesKey) != nil ? "已关联" : "未关联")
                             .font(.caption2)
@@ -304,20 +289,19 @@ struct LibraryPage: View {
                 } label: {
                     Text(online.binding(for: show.seriesKey) != nil ? "更换" : "关联")
                 }
-                .controlSize(.small)
+                .buttonStyle(NagomiSecondaryButtonStyle())
                 Button {
                     online.removeFromLibrary(show)
                 } label: {
                     Image(systemName: "trash")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .font(.system(size: 17))
+                .buttonStyle(NagomiIconButtonStyle())
                 .help("从番库移除")
             }
         }
         .padding(10)
-        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
+        .nagomiCard(cornerRadius: 8)
+.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 8))
         // 行出现即加载分集与已关联条目信息（幂等）
         .task(id: show.id) { await online.ensureEpisodes(for: show) }
         .task(id: "\(show.id)-subject") { await online.ensureSubject(for: show) }
@@ -436,9 +420,7 @@ struct LibraryPage: View {
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .font(.system(size: 17))
+                .buttonStyle(NagomiIconButtonStyle())
                 .help("重新扫描该目录（检测新集 / 文件删除）")
                 .disabled(model.isScanning)
                 // 从番库移除该番
@@ -447,14 +429,13 @@ struct LibraryPage: View {
                 } label: {
                     Image(systemName: "trash")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .font(.system(size: 17))
+                .buttonStyle(NagomiIconButtonStyle())
                 .help("从番库移除")
             }
         }
         .padding(10)
-        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
+        .nagomiCard(cornerRadius: 8)
+.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 8))
         // 懒加载该番的 Bangumi 集数列表（已缓存则立即返回）
         .onAppear {
             Task { await model.ensureEpisodes(for: series) }
@@ -515,7 +496,8 @@ struct LibraryPage: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
+        .nagomiCard(cornerRadius: 8)
+.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
@@ -634,7 +616,7 @@ struct LibraryPage: View {
                 Label("关联", systemImage: "link")
             }
         }
-        .controlSize(.regular)
+        .buttonStyle(NagomiSecondaryButtonStyle())
         .help(series.matchState == .matched ? "重新关联到其它 Bangumi 条目" : "查看自动匹配结果并确认，或手动搜索")
     }
 }

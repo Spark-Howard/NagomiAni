@@ -104,8 +104,10 @@ struct OnlinePage: View {
     private var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: "play.tv")
-                .font(.system(size: 56))
-                .foregroundStyle(NagomiTheme.accent.opacity(0.5))
+                .font(.system(size: 42, weight: .medium))
+                .foregroundStyle(NagomiTheme.accent)
+                .frame(width: 92, height: 92)
+                .background(NagomiTheme.accentSoft, in: Circle())
             Text(model.isLoadingShows
                  ? "正在加载片源…"
                  : "没有加载到任何内容\n可在「添加片源」里检查资源站或稍后重试")
@@ -189,9 +191,7 @@ struct OnlinePage: View {
                 } label: {
                     Image(systemName: model.isInLibrary(show) ? "bookmark.fill" : "bookmark")
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(model.isInLibrary(show) ? NagomiTheme.accent : Color.secondary)
-                .font(.system(size: 15))
+                .buttonStyle(NagomiIconButtonStyle())
                 .help(model.isInLibrary(show) ? "从番库移除" : "加入番库")
                 bindButton(for: show)
                 if model.binding(for: show.seriesKey) != nil {
@@ -200,15 +200,14 @@ struct OnlinePage: View {
                     } label: {
                         Image(systemName: "xmark.circle")
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .font(.system(size: 15))
+                    .buttonStyle(NagomiIconButtonStyle())
                     .help("解除关联")
                 }
             }
         }
         .padding(10)
-        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
+        .nagomiCard(cornerRadius: 8)
+.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 8))
         // 行出现即加载集列表（幂等）
         .task(id: show.id) { await model.ensureEpisodes(for: show) }
         // 行出现时补拉已关联条目的封面/名称
@@ -238,19 +237,9 @@ struct OnlinePage: View {
     @ViewBuilder
     private func bindBadge(_ show: OnlineShow) -> some View {
         if model.binding(for: show.seriesKey) != nil {
-            Text("已关联")
-                .font(.caption2)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.green.opacity(0.15), in: Capsule())
-                .foregroundStyle(.green)
+            NagomiBadge(text: "已关联", foreground: .green, background: Color.green.opacity(0.15))
         } else {
-            Text("未关联")
-                .font(.caption2)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.gray.opacity(0.15), in: Capsule())
-                .foregroundStyle(.secondary)
+            NagomiBadge(text: "未关联", foreground: .secondary, background: Color.gray.opacity(0.15))
         }
     }
 
@@ -260,7 +249,7 @@ struct OnlinePage: View {
         } label: {
             Text(model.binding(for: show.seriesKey) != nil ? "更换" : "关联")
         }
-        .controlSize(.small)
+        .buttonStyle(NagomiSecondaryButtonStyle())
     }
 
     /// 集行：主体是播放按钮（含已看徽章），尾部是独立的缓存控制按钮（不能嵌套进播放按钮）
@@ -308,9 +297,7 @@ struct OnlinePage: View {
             } label: {
                 Image(systemName: "arrow.down.circle")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .font(.system(size: 15))
+            .buttonStyle(NagomiIconButtonStyle())
             .help("缓存本集到本地")
         case .downloading(let progress):
             VStack(alignment: .trailing, spacing: 2) {
@@ -333,9 +320,7 @@ struct OnlinePage: View {
             } label: {
                 Image(systemName: "xmark.circle")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .font(.system(size: 13))
+            .buttonStyle(NagomiIconButtonStyle(size: 22))
             .help("取消缓存")
         case .cached:
             VStack(alignment: .trailing, spacing: 1) {
@@ -354,9 +339,7 @@ struct OnlinePage: View {
             } label: {
                 Image(systemName: "trash")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .font(.system(size: 13))
+            .buttonStyle(NagomiIconButtonStyle(size: 22))
             .help("删除本地缓存")
         }
     }
@@ -411,6 +394,7 @@ struct OnlineSourceSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { add() }
                 Button("添加") { add() }
+                    .buttonStyle(NagomiPrimaryButtonStyle())
                     .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty)
             }
 
@@ -432,12 +416,7 @@ struct OnlineSourceSheet: View {
                                 .truncationMode(.middle)
                         }
                         Spacer()
-                        Text("内置")
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(NagomiTheme.accentSoft, in: Capsule())
-                            .foregroundStyle(NagomiTheme.accent)
+                        NagomiBadge(text: "内置", foreground: NagomiTheme.accent, background: NagomiTheme.accentSoft)
                     }
                 }
 
@@ -460,8 +439,7 @@ struct OnlineSourceSheet: View {
                                 } label: {
                                     Image(systemName: "trash")
                                 }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.secondary)
+                                .buttonStyle(NagomiIconButtonStyle())
                                 .help("移除该站点")
                             }
                         }
@@ -478,6 +456,7 @@ struct OnlineSourceSheet: View {
             HStack {
                 Spacer()
                 Button("完成") { dismiss() }
+                    .buttonStyle(NagomiSecondaryButtonStyle())
             }
         }
         .padding(16)
@@ -555,6 +534,7 @@ struct OnlineBindSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { search() }
                 Button("搜索") { search() }
+                    .buttonStyle(NagomiPrimaryButtonStyle())
                     .disabled(keyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearching)
             }
 
@@ -612,7 +592,8 @@ struct OnlineBindSheet: View {
                 .foregroundStyle(.secondary)
         }
         .padding(6)
-        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 6))
+        .nagomiCard(cornerRadius: 6)
+.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func subjectRow(_ subject: Subject) -> some View {

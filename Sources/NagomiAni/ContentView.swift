@@ -30,8 +30,12 @@ struct ContentView: View {
             }
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // 列表页淡粉底（页面自身透明，底色统一从这里来）
+                .background(NagomiTheme.pageBackground)
         }
         .environmentObject(contacts)
+        // 全局品牌色：按钮/进度条/滑块/开关等 accent 语义控件自动跟随樱粉
+        .tint(NagomiTheme.accent)
         // 不用窗口工具栏：播放器/番库/Bangumi 三页顶部（标题栏）高度保持一致，
         // 避免切换页面时 UI 上下跳动（"打开文件"按钮已移入播放器顶部栏）
         .onAppear {
@@ -349,15 +353,15 @@ struct SidebarView: View {
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(NagomiTheme.pageBackground)
     }
 
     private func background(for item: SidebarItem) -> Color {
         if selection == item {
-            return Color.accentColor.opacity(0.2)
+            return NagomiTheme.accentSoft
         }
         if hoveredItem == item {
-            return Color.gray.opacity(0.12)
+            return NagomiTheme.cardHover
         }
         return Color.clear
     }

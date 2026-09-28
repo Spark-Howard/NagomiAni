@@ -260,7 +260,7 @@ struct PlayerView: View {
                         .font(.callout)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 4)
-                        .background(Color.accentColor, in: Capsule())
+                        .background(NagomiTheme.accent, in: Capsule())
                         .foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
@@ -334,7 +334,7 @@ struct PlayerView: View {
                     Image(systemName: model.autoPlayNextEnabled
                           ? "arrow.right.circle.fill" : "arrow.right.circle")
                         .font(.title3)
-                        .foregroundStyle(model.autoPlayNextEnabled ? Color.accentColor : .white)
+                        .foregroundStyle(model.autoPlayNextEnabled ? NagomiTheme.accent : .white)
                 }
                 .buttonStyle(.plain)
                 .help(model.autoPlayNextEnabled ? "看完提示连播：开（点击关闭）" : "看完提示连播：关（点击开启）")

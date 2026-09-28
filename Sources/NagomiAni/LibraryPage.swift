@@ -114,7 +114,7 @@ struct LibraryPage: View {
         VStack(spacing: 16) {
             Image(systemName: "books.vertical")
                 .font(.system(size: 56))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NagomiTheme.accent.opacity(0.5))
             Text("导入本地动漫目录，或在「在线」页把剧集加入番库\n这里会按「番」聚合显示并关联 Bangumi 条目")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
@@ -206,7 +206,7 @@ struct LibraryPage: View {
             }
             .padding(10)
             .frame(width: 210, alignment: .leading)
-            .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -252,7 +252,7 @@ struct LibraryPage: View {
                         .font(.system(size: 18))
                         .foregroundStyle(.tint)
                         .frame(width: 44, height: 60)
-                        .background(Color.gray.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                        .background(NagomiTheme.accentSoft, in: RoundedRectangle(cornerRadius: 6))
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(show.title)
@@ -263,8 +263,8 @@ struct LibraryPage: View {
                             .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.15), in: Capsule())
-                            .foregroundStyle(.blue)
+                            .background(NagomiTheme.accentSoft, in: Capsule())
+                            .foregroundStyle(NagomiTheme.accent)
                         // 拉取式更新提醒：展开时刷新分集并清零，收起后出新集会显示
                         if let newCount = online.newEpisodeCount(for: show) {
                             Text("新集 \(newCount)")
@@ -317,7 +317,7 @@ struct LibraryPage: View {
             }
         }
         .padding(10)
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
         // 行出现即加载分集与已关联条目信息（幂等）
         .task(id: show.id) { await online.ensureEpisodes(for: show) }
         .task(id: "\(show.id)-subject") { await online.ensureSubject(for: show) }
@@ -454,7 +454,7 @@ struct LibraryPage: View {
             }
         }
         .padding(10)
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
         // 懒加载该番的 Bangumi 集数列表（已缓存则立即返回）
         .onAppear {
             Task { await model.ensureEpisodes(for: series) }
@@ -515,7 +515,7 @@ struct LibraryPage: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Color.gray.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
@@ -534,7 +534,7 @@ struct LibraryPage: View {
             HStack(spacing: 10) {
                 Image(systemName: "play.circle.fill")
                     .font(.system(size: 20))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(NagomiTheme.accent)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(file.fileName)
                         .font(.body)
@@ -547,8 +547,8 @@ struct LibraryPage: View {
                                 .font(.caption2)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 1.5)
-                                .background(Color.accentColor.opacity(0.12), in: Capsule())
-                                .foregroundStyle(Color.accentColor)
+                                .background(NagomiTheme.accent.opacity(0.12), in: Capsule())
+                                .foregroundStyle(NagomiTheme.accent)
                         }
                         if let size = file.fileSize {
                             Text(Self.formatFileSize(size))
@@ -749,7 +749,7 @@ struct LibraryBindSheet: View {
                 .foregroundStyle(.secondary)
         }
         .padding(6)
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func subjectRow(_ subject: Subject) -> some View {

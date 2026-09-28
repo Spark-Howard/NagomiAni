@@ -105,7 +105,7 @@ struct OnlinePage: View {
         VStack(spacing: 16) {
             Image(systemName: "play.tv")
                 .font(.system(size: 56))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(NagomiTheme.accent.opacity(0.5))
             Text(model.isLoadingShows
                  ? "正在加载片源…"
                  : "没有加载到任何内容\n可在「添加片源」里检查资源站或稍后重试")
@@ -190,7 +190,7 @@ struct OnlinePage: View {
                     Image(systemName: model.isInLibrary(show) ? "bookmark.fill" : "bookmark")
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(model.isInLibrary(show) ? Color.accentColor : Color.secondary)
+                .foregroundStyle(model.isInLibrary(show) ? NagomiTheme.accent : Color.secondary)
                 .font(.system(size: 15))
                 .help(model.isInLibrary(show) ? "从番库移除" : "加入番库")
                 bindButton(for: show)
@@ -208,7 +208,7 @@ struct OnlinePage: View {
             }
         }
         .padding(10)
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
         // 行出现即加载集列表（幂等）
         .task(id: show.id) { await model.ensureEpisodes(for: show) }
         // 行出现时补拉已关联条目的封面/名称
@@ -227,7 +227,7 @@ struct OnlinePage: View {
                 .font(.system(size: 20))
                 .foregroundStyle(.tint)
                 .frame(width: 44, height: 60)
-                .background(Color.gray.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                .background(NagomiTheme.accentSoft, in: RoundedRectangle(cornerRadius: 6))
         }
     }
 
@@ -436,8 +436,8 @@ struct OnlineSourceSheet: View {
                             .font(.caption2)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.15), in: Capsule())
-                            .foregroundStyle(.blue)
+                            .background(NagomiTheme.accentSoft, in: Capsule())
+                            .foregroundStyle(NagomiTheme.accent)
                     }
                 }
 
@@ -612,7 +612,7 @@ struct OnlineBindSheet: View {
                 .foregroundStyle(.secondary)
         }
         .padding(6)
-        .background(Color.gray.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func subjectRow(_ subject: Subject) -> some View {

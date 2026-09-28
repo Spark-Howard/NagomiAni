@@ -246,7 +246,7 @@ struct BangumiPage: View {
                     .foregroundStyle(.tertiary)
             }
             .padding(8)
-            .background(Color.gray.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

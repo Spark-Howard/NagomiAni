@@ -10,6 +10,7 @@ struct OnlinePage: View {
     var onPlay: (OnlinePlayback) -> Void
 
     @State private var showSourceSheet = false
+    @State private var showCacheSheet = false
     @State private var searchKeyword = ""
 
     static let coverWidth: CGFloat = 112
@@ -33,6 +34,9 @@ struct OnlinePage: View {
         .sheet(isPresented: $showSourceSheet) {
             OnlineSourceSheet(model: model)
         }
+        .sheet(isPresented: $showCacheSheet) {
+            OnlineCacheSheet(model: model, onPlay: onPlay)
+        }
         // 绑定 sheet 由 ContentView 根视图统一呈现（番库页也会触发）
     }
 
@@ -42,9 +46,6 @@ struct OnlinePage: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             searchBar
-            if !model.cachedItems.isEmpty {
-                cachedSection
-            }
             content
             if let message = model.statusMessage {
                 Text(message)
@@ -61,14 +62,13 @@ struct OnlinePage: View {
             Text("在线")
                 .font(.title2)
             Spacer()
-            Text("缓存 \(OnlineStore.formattedBytes(model.cacheTotalBytes))")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("清除全部缓存") {
-                model.clearAllCache()
+            Button {
+                showCacheSheet = true
+            } label: {
+                Label("我的缓存 \(model.cachedItems.count)", systemImage: "arrow.down.doc")
             }
-            .controlSize(.small)
-            .disabled(model.cacheTotalBytes == 0)
+            .buttonStyle(NagomiSecondaryButtonStyle())
+            .disabled(model.cachedItems.isEmpty)
             Button {
                 showSourceSheet = true
             } label: {
@@ -109,104 +109,6 @@ struct OnlinePage: View {
     private func searchOnline() {
         let keyword = searchKeyword
         Task { await model.searchOnline(keyword) }
-    }
-
-    // MARK: - 我的缓存（跨番聚合的已缓存分集）
-
-    private var cachedSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down.doc.fill")
-                    .font(.footnote)
-                    .foregroundStyle(NagomiTheme.accent)
-                Text("我的缓存")
-                    .font(.headline)
-                Text("\(model.cachedItems.count) 集 · \(OnlineStore.formattedBytes(model.cacheTotalBytes))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 12) {
-                    ForEach(model.cachedItems) { item in
-                        cachedCard(item)
-                    }
-                }
-                .padding(.bottom, 4)
-            }
-        }
-    }
-
-    /// 缓存卡片：点击直接从本地副本播放；右键删除此缓存
-    private func cachedCard(_ item: CachedEpisodeItem) -> some View {
-        Button {
-            playCached(item)
-        } label: {
-            VStack(alignment: .leading, spacing: 5) {
-                ZStack(alignment: .bottomLeading) {
-                    Group {
-                        if let url = item.show.coverURL.flatMap(SearchPage.imageURL) {
-                            CoverImageView(url: url, cornerRadius: 0)
-                        } else {
-                            Image(systemName: "play.tv")
-                                .font(.system(size: 28))
-                                .foregroundStyle(NagomiTheme.accent)
-                                .frame(width: Self.coverWidth, height: Self.coverHeight)
-                                .background(NagomiTheme.accentSoft)
-                        }
-                    }
-                    .frame(width: Self.coverWidth, height: Self.coverHeight)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                    Text("第 \(item.episode.number) 集")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(.black.opacity(0.65), in: Capsule())
-                        .foregroundStyle(.white)
-                        .padding(6)
-                }
-                .overlay(alignment: .topTrailing) {
-                    Text(OnlineStore.formattedBytes(item.sizeBytes))
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(.black.opacity(0.55), in: Capsule())
-                        .foregroundStyle(.white)
-                        .padding(4)
-                }
-
-                Text(item.show.title)
-                    .font(.caption)
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .frame(width: Self.coverWidth, alignment: .leading)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button(role: .destructive) {
-                model.removeCache(for: item.episode)
-            } label: {
-                Label("删除此缓存", systemImage: "trash")
-            }
-        }
-    }
-
-    /// 缓存点播：preparePlayback 优先返回本地副本，续播位置自动恢复
-    private func playCached(_ item: CachedEpisodeItem) {
-        Task {
-            do {
-                let target = try await model.preparePlayback(show: item.show, episode: item.episode)
-                onPlay(target)
-            } catch {
-                model.statusMessage = "播放失败：\(error.localizedDescription)"
-            }
-        }
     }
 
     @ViewBuilder
@@ -870,5 +772,102 @@ struct OnlineBindSheet: View {
     private func search() {
         hasSearched = true
         Task { await model.search(keyword: keyword) }
+    }
+}
+
+/// 「我的缓存」面板：跨番聚合的已缓存分集，点击播放（本地副本优先），可单条删除/全部清空
+struct OnlineCacheSheet: View {
+    @ObservedObject var model: OnlineStore
+    var onPlay: (OnlinePlayback) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("我的缓存")
+                    .font(.headline)
+                Text("\(model.cachedItems.count) 集 · \(OnlineStore.formattedBytes(model.cacheTotalBytes))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("清除全部", role: .destructive) {
+                    model.clearAllCache()
+                }
+                .controlSize(.small)
+                .disabled(model.cachedItems.isEmpty)
+                Button("完成") { dismiss() }
+                    .buttonStyle(NagomiSecondaryButtonStyle())
+            }
+
+            if model.cachedItems.isEmpty {
+                Text("暂无缓存。在番详情里点分集行的下载按钮即可缓存到本地。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 30)
+            } else {
+                List(model.cachedItems) { item in
+                    HStack(spacing: 10) {
+                        Group {
+                            if let url = item.show.coverURL.flatMap(SearchPage.imageURL) {
+                                CoverImageView(url: url, cornerRadius: 3)
+                            } else {
+                                Image(systemName: "play.tv")
+                                    .font(.system(size: 14))
+                                    .foregroundStyle(NagomiTheme.accent)
+                                    .frame(width: 40, height: 54)
+                                    .background(NagomiTheme.accentSoft)
+                            }
+                        }
+                        .frame(width: 40, height: 54)
+                        .clipShape(RoundedRectangle(cornerRadius: 3))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.show.title)
+                                .font(.body)
+                                .lineLimit(1)
+                            HStack(spacing: 6) {
+                                Text("第 \(item.episode.number) 集")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(OnlineStore.formattedBytes(item.sizeBytes))
+                                    .font(.caption2)
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Button {
+                            Task {
+                                do {
+                                    let target = try await model.preparePlayback(show: item.show, episode: item.episode)
+                                    dismiss()
+                                    onPlay(target)
+                                } catch {
+                                    model.statusMessage = "播放失败：\(error.localizedDescription)"
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "play.circle.fill")
+                                .font(.title3)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(NagomiTheme.accent)
+                        .help("播放（本地副本）")
+
+                        Button {
+                            model.removeCache(for: item.episode)
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(NagomiIconButtonStyle(size: 22))
+                        .help("删除此缓存")
+                    }
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(16)
+        .frame(width: 500, height: 460)
     }
 }

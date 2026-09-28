@@ -259,6 +259,11 @@ struct LibraryPage: View {
                         if let newCount = online.newEpisodeCount(for: show) {
                             NagomiBadge(text: "新集 \(newCount)", foreground: .orange, background: Color.orange.opacity(0.15))
                         }
+                        // 已缓存集数汇总（分集加载后可算）
+                        if let cachedCount = online.episodes[show.id]?
+                            .filter({ online.cachedKeys.contains($0.resumeKey) }).count, cachedCount > 0 {
+                            NagomiBadge(text: "已缓存 \(cachedCount)", foreground: .green, background: Color.green.opacity(0.15))
+                        }
                         Text(online.binding(for: show.seriesKey) != nil ? "已关联" : "未关联")
                             .font(.caption2)
                             .padding(.horizontal, 6)
@@ -326,6 +331,8 @@ struct LibraryPage: View {
                         .foregroundStyle(.green)
                 }
                 Spacer()
+                // 缓存状态：未缓存=下载、下载中=进度、已缓存=大小（与在线详情页一致）
+                OnlineCacheControl(store: online, show: show, episode: episode)
             }
             .contentShape(Rectangle())
         }

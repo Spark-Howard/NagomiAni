@@ -23,6 +23,13 @@ struct PlayerView: View {
                 emptyState
             } else {
                 VideoSurfaceRepresentable(view: model.engine.videoSurface ?? NSView())
+                // 弹幕悬浮层：与字幕同时显示（独立渲染，不占字幕轨）
+                DanmakuOverlayView(
+                    controller: model.danmaku,
+                    currentTime: { model.engine.currentTime },
+                    isPlaying: model.state == .playing
+                )
+                .allowsHitTesting(false)
                 GeometryReader { geo in
                     ZStack {
                         VStack {
@@ -319,6 +326,7 @@ struct PlayerView: View {
 
                 audioMenu
                 subtitleMenu
+                DanmakuMenu(controller: model.danmaku)
                 // 线路切换（在线多线路且不在加载中时显示；播放中换源保留当前进度）
                 if model.routeCount > 1, !model.isLoading {
                     routeMenu

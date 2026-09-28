@@ -284,7 +284,8 @@ struct ContentView: View {
                         ),
                         httpHeaders: playback.httpHeaders,
                         userAgent: playback.userAgent,
-                        routes: playback.routes
+                        routes: playback.routes,
+                        showTitle: playback.showTitle
                     )
                 }
                 }
@@ -314,7 +315,8 @@ struct ContentView: View {
                         ),
                         httpHeaders: target.httpHeaders,
                         userAgent: target.userAgent,
-                        routes: target.routes
+                        routes: target.routes,
+                        showTitle: target.showTitle
                     )
                 }
             }

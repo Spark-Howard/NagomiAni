@@ -78,6 +78,8 @@ final class PlayerModel: ObservableObject {
     private var activeOnline: OnlinePlayback?
 
     let engine = MPVPlaybackEngine()
+    /// 弹幕拉取与状态（渲染走独立悬浮层，与字幕共存）
+    let danmaku = DanmakuController()
 
     private var currentMedia: (episodeNumber: Int?, seriesKey: String)?
     // 绑定表与 OnlineStore（在线页）共用：合成 seriesKey "online:…" 存同一张表，
@@ -151,7 +153,8 @@ final class PlayerModel: ObservableObject {
         mediaOverride: MediaOverride? = nil,
         httpHeaders: [String: String] = [:],
         userAgent: String? = nil,
-        routes: [String]? = nil
+        routes: [String]? = nil,
+        showTitle: String? = nil
     ) async {
         // 换文件前先把上一个文件的位置落盘
         flushResume(force: true)
@@ -184,6 +187,13 @@ final class PlayerModel: ObservableObject {
         }
         // 断点续播：键默认取文件路径；在线源用稳定合成键（"online:provider:show:ep"，跨会话不变）
         let resumePath = resumeKey ?? url.standardizedFileURL.path
+        // 弹幕匹配上下文：在线番按剧名+集号搜索，本地番按文件指纹匹配
+        let danmakuContext = DanmakuController.Context(
+            key: resumePath,
+            kind: mediaOverride != nil
+                ? .online(showTitle: showTitle ?? displayTitle ?? "", episodeNumber: mediaOverride?.episodeNumber ?? 0)
+                : .local(url: url)
+        )
         let resumeAt = resumeStore.entry(forPath: resumePath)
             .flatMap { ResumePolicy.resumePosition(position: $0.position, duration: $0.duration) }
         pendingResume = (path: resumePath, position: resumeAt ?? 0, duration: 0)
@@ -245,6 +255,8 @@ final class PlayerModel: ObservableObject {
             if let resumeAt {
                 syncMessage = "已从 \(Self.format(resumeAt)) 继续播放"
             }
+            // 弹幕：换集自动拉取（控制器内部判断开关/凭据/同集去重，失败静默）
+            danmaku.prepare(danmakuContext)
         } catch {
             // 引擎已通过 delegate 上报 failed 状态
         }
@@ -817,7 +829,8 @@ extension PlayerModel: @preconcurrency PlaybackEngineDelegate {
                     ),
                     httpHeaders: next.httpHeaders,
                     userAgent: next.userAgent,
-                    routes: next.routes
+                    routes: next.routes,
+                    showTitle: next.showTitle
                 )
             }
         }

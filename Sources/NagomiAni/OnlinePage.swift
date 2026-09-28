@@ -12,6 +12,9 @@ struct OnlinePage: View {
     @State private var showSourceSheet = false
     @State private var showCacheSheet = false
     @State private var searchKeyword = ""
+    /// 搜索框焦点：进入详情/打开面板时主动失焦——macOS 焦点环画在窗口覆盖层，
+    /// 不失焦会透过详情页残留蓝色粗框
+    @FocusState private var searchFieldFocused: Bool
 
     static let coverWidth: CGFloat = 112
     static let coverHeight: CGFloat = 152
@@ -63,6 +66,7 @@ struct OnlinePage: View {
                 .font(.title2)
             Spacer()
             Button {
+                searchFieldFocused = false
                 showCacheSheet = true
             } label: {
                 Label("我的缓存 \(model.cachedItems.count)", systemImage: "arrow.down.doc")
@@ -70,6 +74,7 @@ struct OnlinePage: View {
             .buttonStyle(NagomiSecondaryButtonStyle())
             .disabled(model.cachedItems.isEmpty)
             Button {
+                searchFieldFocused = false
                 showSourceSheet = true
             } label: {
                 Label("添加片源", systemImage: "plus.circle")
@@ -87,6 +92,7 @@ struct OnlinePage: View {
         HStack(spacing: 8) {
             TextField("搜索片源（资源站关键词）", text: $searchKeyword)
                 .textFieldStyle(.roundedBorder)
+                .focused($searchFieldFocused)
                 .onSubmit { searchOnline() }
             Button("搜索") {
                 searchOnline()
@@ -101,6 +107,7 @@ struct OnlinePage: View {
                 Button("返回目录") {
                     model.clearOnlineSearch()
                     searchKeyword = ""
+                    searchFieldFocused = false
                 }
             }
         }
@@ -214,6 +221,7 @@ struct OnlinePage: View {
     /// 封面卡片（高清图作为按钮）：点击进入番详情
     private func coverCard(_ show: OnlineShow) -> some View {
         Button {
+            searchFieldFocused = false
             model.open(show)
         } label: {
             VStack(alignment: .leading, spacing: 5) {

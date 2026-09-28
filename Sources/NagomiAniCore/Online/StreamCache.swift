@@ -147,7 +147,7 @@ public final class StreamCache: @unchecked Sendable {
            let initURL = HLSParser.resolve(initURI, against: mediaURL) {
             let ext = Self.urlExtension(initURI, fallback: "mp4")
             let localURL = dir.appendingPathComponent("init.\(ext)")
-            let data = try await fetchData(initURL, httpHeaders: httpHeaders, userAgent: userAgent)
+            let data = try await fetchDataWithRetry(initURL, httpHeaders: httpHeaders, userAgent: userAgent)
             try data.write(to: localURL)
             initLocalName = localURL.lastPathComponent
         }
@@ -174,7 +174,7 @@ public final class StreamCache: @unchecked Sendable {
                     if let existingSize = Self.fileSize(at: localURL) {
                         byteCount = existingSize // 中断续传：已存在的分片按既有大小计入
                     } else {
-                        let data = try await self.fetchData(segmentURL, httpHeaders: httpHeaders, userAgent: userAgent)
+                        let data = try await self.fetchDataWithRetry(segmentURL, httpHeaders: httpHeaders, userAgent: userAgent)
                         try data.write(to: localURL)
                         byteCount = Int64(data.count)
                     }
@@ -293,6 +293,25 @@ public final class StreamCache: @unchecked Sendable {
             throw CacheError.httpStatus(http.statusCode)
         }
         return data
+    }
+
+    /// 带一次重试的拉取：资源站偶发断连/限流时避免整集缓存直接失败
+    private func fetchDataWithRetry(
+        _ url: URL, httpHeaders: [String: String], userAgent: String?
+    ) async throws -> Data {
+        var lastError: Error = CacheError.httpStatus(0)
+        for attempt in 0..<2 {
+            do {
+                return try await fetchData(url, httpHeaders: httpHeaders, userAgent: userAgent)
+            } catch {
+                lastError = error
+                if attempt + 1 < 2 {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    try Task.checkCancellation()
+                }
+            }
+        }
+        throw lastError
     }
 
     private func fetchPlaylist(_ url: URL, httpHeaders: [String: String], userAgent: String?) async throws -> HLSPlaylist {

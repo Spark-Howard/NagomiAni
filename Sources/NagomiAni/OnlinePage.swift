@@ -798,6 +798,12 @@ struct OnlineCacheSheet: View {
         }
     }
 
+    /// 失败的缓存任务（key 排序稳定）
+    private var failedItems: [OnlineStore.FailedCacheItem] {
+        model.failedCaches.values
+            .sorted { $0.id < $1.id }
+    }
+
     /// 已完成缓存按番分组（番名排序，组内按集号）
     private var groups: [(show: OnlineShow, items: [CachedEpisodeItem], totalSize: Int64)] {
         Dictionary(grouping: model.cachedItems, by: \.show.id)
@@ -824,12 +830,12 @@ struct OnlineCacheSheet: View {
                     model.clearAllCache()
                 }
                 .controlSize(.small)
-                .disabled(model.cachedItems.isEmpty && model.cacheProgress.isEmpty)
+                .disabled(model.cachedItems.isEmpty && model.cacheProgress.isEmpty && failedItems.isEmpty)
                 Button("完成") { dismiss() }
                     .buttonStyle(NagomiSecondaryButtonStyle())
             }
 
-            if model.cachedItems.isEmpty && inProgress.isEmpty {
+            if model.cachedItems.isEmpty && inProgress.isEmpty && failedItems.isEmpty {
                 Text("暂无缓存。在番详情里点分集行的下载按钮即可缓存到本地。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -838,6 +844,43 @@ struct OnlineCacheSheet: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
+                        // ---- 失败的缓存（可重试/移除）----
+                        if !failedItems.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label("缓存失败 \(failedItems.count)", systemImage: "exclamationmark.triangle")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.orange)
+                                ForEach(failedItems) { failed in
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "exclamationmark.circle")
+                                            .foregroundStyle(.orange)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(failed.show.title)
+                                                .font(.callout)
+                                                .lineLimit(1)
+                                            Text("第 \(failed.episode.number) 集 — \(failed.message)")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                        }
+                                        Spacer()
+                                        Button("重试") {
+                                            model.retryCache(for: failed.episode)
+                                        }
+                                        .buttonStyle(NagomiSecondaryButtonStyle())
+                                        Button {
+                                            model.dismissCacheFailure(for: failed.episode)
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                        }
+                                        .buttonStyle(NagomiIconButtonStyle(size: 22))
+                                        .help("移除失败记录")
+                                    }
+                                    .padding(8)
+                                    .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                                }
+                            }
+                        }
                         // ---- 正在缓存的队列 ----
                         if !inProgress.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {

@@ -720,6 +720,19 @@ final class OnlineStore: ObservableObject {
     /// 缓存总字节数
     @Published private(set) var cacheTotalBytes: Int64 = 0
     private var cacheTasks: [String: Task<Void, Never>] = [:]
+    /// 下载并发上限：同站多路并发会被资源站限流/断连（用户报告"只有部分成功"的根因）
+    private let maxConcurrentDownloads = 2
+    /// 排队中尚未开始的下载
+    private var pendingDownloads: [(show: OnlineShow, episode: OnlineEpisode)] = []
+    private var activeDownloadCount = 0
+    /// 失败的缓存任务（key → 信息）：面板中展示并可重试/移除
+    struct FailedCacheItem: Identifiable {
+        let id: String
+        let show: OnlineShow
+        let episode: OnlineEpisode
+        let message: String
+    }
+    @Published private(set) var failedCaches: [String: FailedCacheItem] = [:]
 
     enum CacheState: Equatable {
         case notCached
@@ -783,56 +796,104 @@ final class OnlineStore: ObservableObject {
     }
 
     /// 手动缓存一集（HLS 走分片下载 + 本地 playlist；渐进式走整文件流式落盘）
+    /// 手动缓存一集：登记进下载队列（并发 2），失败进 failedCaches 可重试
     func startCache(show: OnlineShow, episode: OnlineEpisode) {
         let key = episode.resumeKey
-        guard cacheTasks[key] == nil, !cachedKeys.contains(key) else { return }
-        guard let provider = provider(id: episode.providerID) else { return }
-        let cache = cache
-        cacheProgress[key] = StreamCache.Progress(downloadedSegments: 0, totalSegments: 0)
-        let task = Task {
-            defer { cacheTasks[key] = nil }
-            do {
-                let source = try await provider.streamURL(for: episode)
-                let progressHandler: @Sendable (StreamCache.Progress) -> Void = { [weak self] progress in
-                    Task { @MainActor [weak self] in
-                        self?.cacheProgress[key] = progress
-                    }
-                }
-                if source.isHLS {
-                    _ = try await cache.download(
-                        playlistURL: source.url,
-                        httpHeaders: source.httpHeaders,
-                        userAgent: source.userAgent,
-                        cacheKey: key,
-                        progress: progressHandler
-                    )
-                } else {
-                    _ = try await cache.downloadFile(
-                        url: source.url,
-                        httpHeaders: source.httpHeaders,
-                        userAgent: source.userAgent,
-                        cacheKey: key,
-                        progress: progressHandler
-                    )
-                }
-                cachedKeys.insert(key)
-                cacheProgress[key] = nil
-                cacheSizes[key] = cache.sizeBytes(for: key)
-                cacheTotalBytes = cache.totalBytes()
-                rebuildCachedItems()
-                statusMessage = "已缓存「\(show.title) 第 \(episode.number) 集」"
-            } catch is CancellationError {
-                cacheProgress[key] = nil
-            } catch {
-                cacheProgress[key] = nil
-                statusMessage = "缓存失败：\(error.localizedDescription)"
-            }
+        guard cacheTasks[key] == nil, !cachedKeys.contains(key),
+              failedCaches[key] == nil, cacheProgress[key] == nil,
+              !pendingDownloads.contains(where: { $0.episode.resumeKey == key }) else { return }
+        guard provider(id: episode.providerID) != nil else {
+            statusMessage = "未知的片源提供方"
+            return
         }
-        cacheTasks[key] = task
+        failedCaches[key] = nil
+        cacheProgress[key] = StreamCache.Progress(downloadedSegments: 0, totalSegments: 0) // 排队占位
+        pendingDownloads.append((show: show, episode: episode))
+        pumpDownloads()
+    }
+
+    /// 下载队列调度：最多 maxConcurrentDownloads 个并行
+    private func pumpDownloads() {
+        while activeDownloadCount < maxConcurrentDownloads, !pendingDownloads.isEmpty {
+            let item = pendingDownloads.removeFirst()
+            activeDownloadCount += 1
+            let key = item.episode.resumeKey
+            let task = Task {
+                await runDownload(show: item.show, episode: item.episode)
+                activeDownloadCount -= 1
+                cacheTasks[key] = nil
+                pumpDownloads() // 启动队列中的下一个
+            }
+            cacheTasks[key] = task
+        }
+    }
+
+    private func runDownload(show: OnlineShow, episode: OnlineEpisode) async {
+        let key = episode.resumeKey
+        let cache = cache
+        defer { cacheProgress[key] = nil }
+        do {
+            guard let provider = provider(id: episode.providerID) else {
+                throw OnlineStoreError.unknownProvider
+            }
+            let source = try await provider.streamURL(for: episode)
+            let progressHandler: @Sendable (StreamCache.Progress) -> Void = { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.cacheProgress[key] = progress
+                }
+            }
+            if source.isHLS {
+                _ = try await cache.download(
+                    playlistURL: source.url,
+                    httpHeaders: source.httpHeaders,
+                    userAgent: source.userAgent,
+                    cacheKey: key,
+                    progress: progressHandler
+                )
+            } else {
+                _ = try await cache.downloadFile(
+                    url: source.url,
+                    httpHeaders: source.httpHeaders,
+                    userAgent: source.userAgent,
+                    cacheKey: key,
+                    progress: progressHandler
+                )
+            }
+            cachedKeys.insert(key)
+            cacheSizes[key] = cache.sizeBytes(for: key)
+            cacheTotalBytes = cache.totalBytes()
+            rebuildCachedItems()
+            failedCaches[key] = nil
+            statusMessage = "已缓存「\(show.title) 第 \(episode.number) 集」"
+        } catch is CancellationError {
+            // 用户取消：defer 已清理进度
+        } catch {
+            failedCaches[key] = FailedCacheItem(
+                id: key, show: show, episode: episode, message: error.localizedDescription
+            )
+            statusMessage = "缓存失败：「\(show.title) 第 \(episode.number) 集」— \(error.localizedDescription)"
+        }
+    }
+
+    /// 重试失败的缓存
+    func retryCache(for episode: OnlineEpisode) {
+        guard let failed = failedCaches[episode.resumeKey] else { return }
+        failedCaches[episode.resumeKey] = nil
+        startCache(show: failed.show, episode: failed.episode)
+    }
+
+    /// 面板中移除失败记录（不重试）
+    func dismissCacheFailure(for episode: OnlineEpisode) {
+        failedCaches[episode.resumeKey] = nil
     }
 
     func cancelCache(for episode: OnlineEpisode) {
-        cacheTasks[episode.resumeKey]?.cancel()
+        let key = episode.resumeKey
+        cacheTasks[key]?.cancel()
+        cacheTasks[key] = nil
+        pendingDownloads.removeAll { $0.episode.resumeKey == key }
+        cacheProgress[key] = nil
+        failedCaches[key] = nil
     }
 
     func removeCache(for episode: OnlineEpisode) {
@@ -847,6 +908,7 @@ final class OnlineStore: ObservableObject {
         cache.purgeAll()
         cachedKeys.removeAll()
         cacheSizes.removeAll()
+        failedCaches.removeAll()
         cacheTotalBytes = 0
         statusMessage = "已清除全部缓存"
         rebuildCachedItems()

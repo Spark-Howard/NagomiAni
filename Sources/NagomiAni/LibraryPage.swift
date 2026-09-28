@@ -313,31 +313,34 @@ struct LibraryPage: View {
     }
 
     private func cloudEpisodeRow(show: OnlineShow, episode: OnlineEpisode) -> some View {
-        Button {
-            playCloud(show: show, episode: episode)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "play.circle")
-                    .foregroundStyle(.tint)
-                Text(episode.title ?? "第 \(episode.number) 集")
-                    .font(.callout)
-                    .lineLimit(1)
-                if online.isWatched(episode) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.green)
-                    Text("已看")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
+        // ⚠️ 播放按钮与缓存控件必须是同级兄弟，不能把缓存控件嵌进播放按钮的
+        // label——嵌套按钮会双重触发（点下载同时开始播放）
+        HStack(spacing: 8) {
+            Button {
+                playCloud(show: show, episode: episode)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "play.circle")
+                        .foregroundStyle(.tint)
+                    Text(episode.title ?? "第 \(episode.number) 集")
+                        .font(.callout)
+                        .lineLimit(1)
+                    if online.isWatched(episode) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                        Text("已看")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                    }
+                    Spacer()
                 }
-                Spacer()
-                // 缓存状态：未缓存=下载、下载中=进度、已缓存=大小（与在线详情页一致）
-                OnlineCacheControl(store: online, show: show, episode: episode)
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            OnlineCacheControl(store: online, show: show, episode: episode)
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.primary)
         .padding(.leading, 54)
         .padding(.vertical, 4)
     }

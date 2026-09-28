@@ -466,7 +466,8 @@ final class OnlineStore: ObservableObject {
         showsLoaded = true
     }
 
-    /// 用当前匹配结果重建分组并发布（自动关联在每次重建时补写，已绑定的不覆盖）
+    /// 用当前匹配结果重建分组并发布（自动关联在每次重建时补写，已绑定的不覆盖）。
+    /// 没有放送番的日期不生成空分组（避免页面出现空洞的组头）。
     private func rebuildWeekly(
         sectionMeta: [(id: String, title: String, dateText: String)],
         flatSubjects: [(sectionIndex: Int, subject: CalendarSubject)],
@@ -475,6 +476,7 @@ final class OnlineStore: ObservableObject {
         var weekly: [WeeklyShowSection] = []
         for (index, meta) in sectionMeta.enumerated() {
             let sectionSubjects = flatSubjects.filter { $0.sectionIndex == index }
+            guard !sectionSubjects.isEmpty else { continue }
             let shows = sectionSubjects.compactMap { results[$0.subject.id] }
             weekly.append(WeeklyShowSection(
                 id: meta.id, title: meta.title, dateText: meta.dateText,

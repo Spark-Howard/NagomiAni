@@ -394,29 +394,36 @@ final class PlayerModel: ObservableObject {
         Self.savePendingWatchedMarks(marks)
     }
 
-    /// 补同步积压记录：逐条拉集数表并标记；仍失败的保留在队列
+    /// 补同步积压记录：**按番分组**——同番只拉一次集数表，命中的集数一次批量标记
+    /// （省请求、尊重 bgm.tv 限频）；仍失败的（网络/权限）保留在队列
     private func flushPendingWatchedMarks(client: BangumiClient) async {
         let pending = Self.loadPendingWatchedMarks()
         guard !pending.isEmpty else { return }
         var remaining: [PendingWatchedMark] = []
-        var synced = 0
-        for mark in pending {
+        var syncedCount = 0
+        for (subjectID, marks) in Dictionary(grouping: pending, by: \.subjectID) {
             do {
-                let eps = try await client.episodes(subjectID: mark.subjectID, type: 0, limit: 300)
-                guard let ep = eps.data.first(where: { Int(($0.sort ?? 0).rounded()) == mark.episodeNumber }) else {
-                    continue // 条目里没有该集（永久性失败）：丢弃
+                let eps = try await client.episodes(subjectID: subjectID, type: 0, limit: 300)
+                var episodeIDs: [Int] = []
+                for mark in marks {
+                    if let ep = eps.data.first(where: { Int(($0.sort ?? 0).rounded()) == mark.episodeNumber }) {
+                        episodeIDs.append(ep.id)
+                    }
+                    // else：条目里没有该集（永久性失败）——丢弃
                 }
-                try await client.markEpisodes(subjectID: mark.subjectID, episodeIDs: [ep.id], type: .watched)
-                synced += 1
+                if !episodeIDs.isEmpty {
+                    try await client.markEpisodes(subjectID: subjectID, episodeIDs: episodeIDs, type: .watched)
+                    syncedCount += episodeIDs.count
+                }
                 // 尊重 bgm.tv 频率限制
                 try? await Task.sleep(nanoseconds: 300_000_000)
             } catch {
-                remaining.append(mark) // 网络/权限仍失败：留在队列下次再试
+                remaining.append(contentsOf: marks) // 网络/权限仍失败：留在队列下次再试
             }
         }
         Self.savePendingWatchedMarks(remaining)
-        if synced > 0 {
-            syncMessage = "已补同步 \(synced) 条离线观看记录 ✓"
+        if syncedCount > 0 {
+            syncMessage = "已补同步 \(syncedCount) 条离线观看记录 ✓"
         }
     }
 

@@ -329,12 +329,14 @@ final class OnlineStore: ObservableObject {
 
     // MARK: - 目录（放送日历聚合：与 Bangumi「最近更新（过去一周）」同一套剧目）
 
-    /// 放送日历聚合结果的一天分组（与搜索页「过去一周」同构）
+    /// 放送日历聚合结果的一天分组（与搜索页「过去一周」同构）。
+    /// totalCount = 该日放送番总数（含尚未匹配到的）；渐进加载时差额渲染为占位卡
     struct WeeklyShowSection: Codable, Identifiable {
         let id: String // yyyy-MM-dd
         let title: String // 今天/周一…
         let dateText: String // 9月28日
-        let shows: [OnlineShow]
+        var shows: [OnlineShow]
+        var totalCount: Int?
     }
 
     static let weeklyCacheKey = "online.weekly.cache"
@@ -343,6 +345,8 @@ final class OnlineStore: ObservableObject {
     @Published private(set) var weeklySections: [WeeklyShowSection] = []
     /// true = 目录来自放送日历聚合；false = 回退的站点目录
     @Published private(set) var isCalendarMode = false
+    /// 渐进加载进行中：差额位置渲染"匹配中"占位卡
+    @Published private(set) var isMatching = false
     /// 详情页当前展示的番（覆盖层导航：返回时目录滚动位置保留）
     @Published private(set) var selectedShow: OnlineShow?
 
@@ -391,20 +395,27 @@ final class OnlineStore: ObservableObject {
             }
         }
 
-        // 2) 池子先兜（各站最新一页，便宜），能直接匹配的直接用
+        // 2) **渐进式**：骨架先发布（按天分组 + 占位卡），用户立刻能看到结构；
+        //    flatSubjects 天然按「今天 → 前 6 天」排序，最近的番最先匹配、最先点亮
+        var results: [Int: OnlineShow] = [:] // subjectID → 聚合条目
+        isMatching = true
+        rebuildWeekly(sectionMeta: sectionMeta, flatSubjects: flatSubjects, results: results)
+
+        // 3) 池子先兜（各站最新一页，便宜）：每拉到一个站点就匹配一轮、即时发布
         let maccms = providers.compactMap { $0 as? MacCMSProvider }
         var pool: [OnlineShow] = []
         for provider in maccms {
             pool += (try? await provider.listShows()) ?? []
-        }
-        var results: [Int: OnlineShow] = [:] // subjectID → 聚合条目
-        for item in flatSubjects {
-            if let match = WeeklyAggregator.bestMatch(item.subject, in: pool) {
-                results[item.subject.id] = WeeklyAggregator.makeEntry(subject: item.subject, source: match.show)
+            for item in flatSubjects where results[item.subject.id] == nil {
+                if let match = WeeklyAggregator.bestMatch(item.subject, in: pool) {
+                    results[item.subject.id] = WeeklyAggregator.makeEntry(subject: item.subject, source: match.show)
+                }
             }
+            rebuildWeekly(sectionMeta: sectionMeta, flatSubjects: flatSubjects, results: results)
         }
 
-        // 3) 未匹配的逐番搜索资源站（并发 4，命中即停）——"最新一页"覆盖不了全部放送番
+        // 4) 剩余的按更新时间顺序（日历序）逐番搜索资源站（并发 4，命中即停），
+        //    每命中一部就发布一次，用户看着列表逐步补齐
         let unmatched = flatSubjects.filter { results[$0.subject.id] == nil }
         let total = unmatched.count
         if !unmatched.isEmpty {
@@ -417,6 +428,7 @@ final class OnlineStore: ObservableObject {
                         if let (id, show) = await group.next() {
                             done += 1
                             if let show { results[id] = show }
+                            rebuildWeekly(sectionMeta: sectionMeta, flatSubjects: flatSubjects, results: results)
                             statusMessage = "正在为放送番匹配片源 \(done)/\(total)…"
                         }
                         inFlight -= 1
@@ -435,26 +447,41 @@ final class OnlineStore: ObservableObject {
                 while let (id, show) = await group.next() {
                     done += 1
                     if let show { results[id] = show }
+                    rebuildWeekly(sectionMeta: sectionMeta, flatSubjects: flatSubjects, results: results)
                     statusMessage = "正在为放送番匹配片源 \(done)/\(total)…"
                 }
             }
         }
 
-        // 4) 组装分组 + 自动关联 + 当天缓存
-        var weekly: [WeeklyShowSection] = []
-        for (index, meta) in sectionMeta.enumerated() {
-            let shows = flatSubjects.filter { $0.sectionIndex == index }.compactMap { results[$0.subject.id] }
-            if !shows.isEmpty {
-                weekly.append(WeeklyShowSection(id: meta.id, title: meta.title, dateText: meta.dateText, shows: shows))
-            }
-        }
-        autoBindCalendarShows(weekly.flatMap(\.shows))
-        applyWeeklySections(weekly)
-        saveWeeklyCache(sections: weekly, fetchedOn: today)
-        if weekly.isEmpty {
+        // 5) 收尾：清除占位 + 当天缓存
+        isMatching = false
+        rebuildWeekly(sectionMeta: sectionMeta, flatSubjects: flatSubjects, results: results)
+        saveWeeklyCache(sections: weeklySections, fetchedOn: today)
+        if weeklySections.flatMap(\.shows).isEmpty {
             statusMessage = "放送日历里的番暂未在资源站找到片源，可用上方搜索按剧名查找"
+        } else {
+            statusMessage = nil
         }
         showsLoaded = true
+    }
+
+    /// 用当前匹配结果重建分组并发布（自动关联在每次重建时补写，已绑定的不覆盖）
+    private func rebuildWeekly(
+        sectionMeta: [(id: String, title: String, dateText: String)],
+        flatSubjects: [(sectionIndex: Int, subject: CalendarSubject)],
+        results: [Int: OnlineShow]
+    ) {
+        var weekly: [WeeklyShowSection] = []
+        for (index, meta) in sectionMeta.enumerated() {
+            let sectionSubjects = flatSubjects.filter { $0.sectionIndex == index }
+            let shows = sectionSubjects.compactMap { results[$0.subject.id] }
+            weekly.append(WeeklyShowSection(
+                id: meta.id, title: meta.title, dateText: meta.dateText,
+                shows: shows, totalCount: sectionSubjects.count
+            ))
+        }
+        applyWeeklySections(weekly)
+        autoBindCalendarShows(weekly.flatMap(\.shows))
     }
 
     /// 放送日历条目自动关联 Bangumi（2026-09-27 用户决策：日历自带精确 subjectID，

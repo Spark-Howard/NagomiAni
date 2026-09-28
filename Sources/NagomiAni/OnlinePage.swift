@@ -110,14 +110,15 @@ struct OnlinePage: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.shows.isEmpty && model.onlineSearchResults == nil {
-            emptyState
-        } else if model.isCalendarMode, model.onlineSearchResults == nil {
+        if model.isCalendarMode, model.onlineSearchResults == nil {
+            // 日历模式：骨架先行（分组+占位卡），匹配结果渐进点亮
             weekSectionsView
         } else if let results = model.onlineSearchResults {
             coverGrid(results)
-        } else {
+        } else if !model.shows.isEmpty {
             coverGrid(model.shows)
+        } else {
+            emptyState
         }
     }
 
@@ -151,8 +152,12 @@ struct OnlinePage: View {
         }
     }
 
+    /// 一天的分组：徽章 + 日期 + 封面卡横排；渐进加载时差额渲染"匹配中"占位卡
     private func daySection(_ section: OnlineStore.WeeklyShowSection) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let pending = model.isMatching
+            ? max((section.totalCount ?? section.shows.count) - section.shows.count, 0)
+            : 0
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Text(section.title)
                     .font(.caption.bold())
@@ -167,8 +172,9 @@ struct OnlinePage: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(section.shows.count) 部")
+                Text("\(section.shows.count)/\(section.totalCount ?? section.shows.count) 部")
                     .font(.caption2)
+                    .monospacedDigit()
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 4)
@@ -178,11 +184,28 @@ struct OnlinePage: View {
                     ForEach(section.shows) { show in
                         coverCard(show)
                     }
+                    // 占位骨架：还没匹配到的放送番（最近的番先点亮）
+                    ForEach(0..<pending, id: \.self) { _ in
+                        matchingPlaceholder
+                    }
                 }
                 .padding(.bottom, 4)
             }
         }
         .padding(.vertical, 6)
+    }
+
+    /// "匹配中"占位卡（骨架屏）
+    private var matchingPlaceholder: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(NagomiTheme.accentSoft.opacity(0.5))
+                .frame(width: Self.coverWidth, height: Self.coverHeight)
+            Text("匹配中…")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: Self.coverWidth, alignment: .leading)
+        }
     }
 
     /// 封面卡片（高清图作为按钮）：点击进入番详情

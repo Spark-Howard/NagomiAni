@@ -775,11 +775,33 @@ struct OnlineBindSheet: View {
     }
 }
 
-/// 「我的缓存」面板：跨番聚合的已缓存分集，点击播放（本地副本优先），可单条删除/全部清空
+/// 「我的缓存」面板：已缓存按番分组展示 + 正在缓存的队列（进度/取消）
 struct OnlineCacheSheet: View {
     @ObservedObject var model: OnlineStore
     var onPlay: (OnlinePlayback) -> Void
     @Environment(\.dismiss) private var dismiss
+
+    /// 正在下载的队列（按 key 排序保持稳定）
+    private var inProgress: [(key: String, show: OnlineShow, episode: OnlineEpisode, progress: StreamCache.Progress)] {
+        model.cacheProgress.keys.sorted().compactMap { key in
+            guard let info = model.episodeInfo(forResumeKey: key),
+                  let progress = model.cacheProgress[key] else { return nil }
+            return (key, info.show, info.episode, progress)
+        }
+    }
+
+    /// 已完成缓存按番分组（番名排序，组内按集号）
+    private var groups: [(show: OnlineShow, items: [CachedEpisodeItem], totalSize: Int64)] {
+        Dictionary(grouping: model.cachedItems, by: \.show.id)
+            .values
+            .map { items in
+                let show = items[0].show
+                return (show,
+                        items.sorted { $0.episode.number < $1.episode.number },
+                        items.reduce(Int64(0)) { $0 + $1.sizeBytes })
+            }
+            .sorted { $0.show.title < $1.show.title }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -794,80 +816,183 @@ struct OnlineCacheSheet: View {
                     model.clearAllCache()
                 }
                 .controlSize(.small)
-                .disabled(model.cachedItems.isEmpty)
+                .disabled(model.cachedItems.isEmpty && model.cacheProgress.isEmpty)
                 Button("完成") { dismiss() }
                     .buttonStyle(NagomiSecondaryButtonStyle())
             }
 
-            if model.cachedItems.isEmpty {
+            if model.cachedItems.isEmpty && inProgress.isEmpty {
                 Text("暂无缓存。在番详情里点分集行的下载按钮即可缓存到本地。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 30)
             } else {
-                List(model.cachedItems) { item in
-                    HStack(spacing: 10) {
-                        Group {
-                            if let url = item.show.coverURL.flatMap(SearchPage.imageURL) {
-                                CoverImageView(url: url, cornerRadius: 3)
-                            } else {
-                                Image(systemName: "play.tv")
-                                    .font(.system(size: 14))
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        // ---- 正在缓存的队列 ----
+                        if !inProgress.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label("正在缓存 \(inProgress.count)", systemImage: "arrow.down.circle")
+                                    .font(.subheadline.weight(.medium))
                                     .foregroundStyle(NagomiTheme.accent)
-                                    .frame(width: 40, height: 54)
-                                    .background(NagomiTheme.accentSoft)
-                            }
-                        }
-                        .frame(width: 40, height: 54)
-                        .clipShape(RoundedRectangle(cornerRadius: 3))
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.show.title)
-                                .font(.body)
-                                .lineLimit(1)
-                            HStack(spacing: 6) {
-                                Text("第 \(item.episode.number) 集")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(OnlineStore.formattedBytes(item.sizeBytes))
-                                    .font(.caption2)
-                                    .monospacedDigit()
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer()
-                        Button {
-                            Task {
-                                do {
-                                    let target = try await model.preparePlayback(show: item.show, episode: item.episode)
-                                    dismiss()
-                                    onPlay(target)
-                                } catch {
-                                    model.statusMessage = "播放失败：\(error.localizedDescription)"
+                                ForEach(inProgress, id: \.key) { item in
+                                    progressRow(item)
                                 }
                             }
-                        } label: {
-                            Image(systemName: "play.circle.fill")
-                                .font(.title3)
                         }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(NagomiTheme.accent)
-                        .help("播放（本地副本）")
-
-                        Button {
-                            model.removeCache(for: item.episode)
-                        } label: {
-                            Image(systemName: "trash")
+                        // ---- 已缓存（按番分组）----
+                        if !groups.isEmpty {
+                            Label("已缓存", systemImage: "checkmark.seal")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            ForEach(groups, id: \.show.id) { group in
+                                groupSection(group)
+                            }
                         }
-                        .buttonStyle(NagomiIconButtonStyle(size: 22))
-                        .help("删除此缓存")
                     }
+                    .padding(.bottom, 8)
                 }
-                .listStyle(.inset)
             }
         }
         .padding(16)
-        .frame(width: 500, height: 460)
+        .frame(width: 520, height: 500)
+    }
+
+    // MARK: - 下载队列行
+
+    private func progressRow(_ item: (key: String, show: OnlineShow, episode: OnlineEpisode, progress: StreamCache.Progress)) -> some View {
+        HStack(spacing: 10) {
+            Group {
+                if let url = item.show.coverURL.flatMap(SearchPage.imageURL) {
+                    CoverImageView(url: url, cornerRadius: 3)
+                } else {
+                    Image(systemName: "play.tv")
+                        .font(.system(size: 12))
+                        .foregroundStyle(NagomiTheme.accent)
+                        .frame(width: 36, height: 48)
+                        .background(NagomiTheme.accentSoft)
+                }
+            }
+            .frame(width: 36, height: 48)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.show.title)
+                    .font(.callout)
+                    .lineLimit(1)
+                HStack(spacing: 8) {
+                    Text("第 \(item.episode.number) 集")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(OnlineStore.progressBytesLabel(item.progress))
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                if let fraction = item.progress.fraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            Spacer()
+            Button {
+                model.cancelCache(for: item.episode)
+            } label: {
+                Image(systemName: "xmark.circle")
+            }
+            .buttonStyle(NagomiIconButtonStyle(size: 24))
+            .help("取消缓存")
+        }
+        .padding(8)
+        .background(NagomiTheme.accentSoft.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    // MARK: - 已缓存分组
+
+    private func groupSection(_ group: (show: OnlineShow, items: [CachedEpisodeItem], totalSize: Int64)) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Group {
+                    if let url = group.show.coverURL.flatMap(SearchPage.imageURL) {
+                        CoverImageView(url: url, cornerRadius: 3)
+                    } else {
+                        Image(systemName: "play.tv")
+                            .font(.system(size: 12))
+                            .foregroundStyle(NagomiTheme.accent)
+                            .frame(width: 36, height: 48)
+                            .background(NagomiTheme.accentSoft)
+                    }
+                }
+                .frame(width: 36, height: 48)
+                .clipShape(RoundedRectangle(cornerRadius: 3))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(group.show.title)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                    Text("\(group.items.count) 集 · \(OnlineStore.formattedBytes(group.totalSize))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    group.items.forEach { model.removeCache(for: $0.episode) }
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(NagomiIconButtonStyle(size: 24))
+                .help("删除该剧目的全部缓存")
+            }
+
+            ForEach(group.items) { item in
+                HStack(spacing: 8) {
+                    Text("第 \(item.episode.number) 集")
+                        .font(.callout)
+                        .padding(.leading, 44)
+                    if model.isWatched(item.episode) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                    Spacer()
+                    Text(OnlineStore.formattedBytes(item.sizeBytes))
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Button {
+                        Task {
+                            do {
+                                let target = try await model.preparePlayback(show: group.show, episode: item.episode)
+                                dismiss()
+                                onPlay(target)
+                            } catch {
+                                model.statusMessage = "播放失败：\(error.localizedDescription)"
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "play.circle.fill")
+                            .font(.title3)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(NagomiTheme.accent)
+                    .help("播放（本地副本）")
+
+                    Button {
+                        model.removeCache(for: item.episode)
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(NagomiIconButtonStyle(size: 22))
+                    .help("删除此缓存")
+                }
+                .padding(.vertical, 3)
+            }
+        }
+        .padding(10)
+        .background(NagomiTheme.accentSoft.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
     }
 }

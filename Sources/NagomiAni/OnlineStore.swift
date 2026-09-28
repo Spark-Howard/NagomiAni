@@ -756,19 +756,25 @@ final class OnlineStore: ObservableObject {
         rebuildCachedItems()
     }
 
+    /// 缓存/进度 key（resumeKey）→ 所属番与集（knownShows/番库收藏反查；番未知返回 nil）
+    func episodeInfo(forResumeKey key: String) -> (show: OnlineShow, episode: OnlineEpisode)? {
+        guard key.hasPrefix("online:") else { return nil }
+        let parts = key.dropFirst("online:".count).split(separator: ":").map(String.init)
+        guard parts.count == 3, let number = Int(parts[2]) else { return nil }
+        let seriesKey = String(key.dropLast(":\(number)".count))
+        guard let show = knownShows[seriesKey]
+            ?? libraryEntries.first(where: {
+                $0.providerID == parts[0] && $0.showID == parts[1]
+            })?.asShow else { return nil }
+        return (show, OnlineEpisode(providerID: show.providerID, showID: show.showID, number: number))
+    }
+
     /// 从已缓存 key 聚合「我的缓存」条目（按番名+集号排序；番未知的跳过）
     private func rebuildCachedItems() {
         cachedItems = cachedKeys.compactMap { key -> CachedEpisodeItem? in
-            guard key.hasPrefix("online:") else { return nil }
-            let parts = key.dropFirst("online:".count).split(separator: ":").map(String.init)
-            guard parts.count == 3, let number = Int(parts[2]) else { return nil }
-            let seriesKey = String(key.dropLast(":\(number)".count))
-            guard let show = knownShows[seriesKey]
-                ?? libraryEntries.first(where: {
-                    $0.providerID == parts[0] && $0.showID == parts[1]
-                })?.asShow else { return nil }
-            let episode = OnlineEpisode(providerID: show.providerID, showID: show.showID, number: number)
-            return CachedEpisodeItem(id: key, show: show, episode: episode, sizeBytes: cacheSizes[key] ?? 0)
+            guard let info = episodeInfo(forResumeKey: key) else { return nil }
+            return CachedEpisodeItem(id: key, show: info.show, episode: info.episode,
+                                     sizeBytes: cacheSizes[key] ?? 0)
         }
         .sorted { lhs, rhs in
             if lhs.show.title != rhs.show.title { return lhs.show.title < rhs.show.title }

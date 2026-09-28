@@ -146,6 +146,8 @@ struct DanmakuSettingsSheet: View {
     @State private var appId = UserDefaults.standard.string(forKey: DanmakuController.appIdKey) ?? ""
     @State private var appSecret = UserDefaults.standard.string(forKey: DanmakuController.appSecretKey) ?? ""
     @Environment(\.dismiss) private var dismiss
+    @State private var baseURL = UserDefaults.standard.string(forKey: DanmakuController.baseURLKey)
+        ?? "https://api.dandanplay.net"
 
     private var inputValid: Bool {
         !appId.trimmingCharacters(in: .whitespaces).isEmpty
@@ -165,6 +167,8 @@ struct DanmakuSettingsSheet: View {
                 .textFieldStyle(.roundedBorder)
             SecureField("AppSecret", text: $appSecret)
                 .textFieldStyle(.roundedBorder)
+            TextField("API 服务器地址（一般不用改）", text: $baseURL)
+                .textFieldStyle(.roundedBorder)
 
             Text("弹幕以悬浮层渲染，与字幕同时显示互不影响；弹幕数据按剧集缓存在内存，同集切回不重复请求。")
                 .font(.caption2)
@@ -179,6 +183,7 @@ struct DanmakuSettingsSheet: View {
                 Button("保存") {
                     UserDefaults.standard.set(appId, forKey: DanmakuController.appIdKey)
                     UserDefaults.standard.set(appSecret, forKey: DanmakuController.appSecretKey)
+                    UserDefaults.standard.set(baseURL, forKey: DanmakuController.baseURLKey)
                     controller.refreshConfiguration()
                     dismiss()
                 }

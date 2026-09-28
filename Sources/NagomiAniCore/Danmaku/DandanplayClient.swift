@@ -50,11 +50,15 @@ public enum DanmakuError: LocalizedError, Equatable {
 public final class DandanplayClient: @unchecked Sendable {
     private let credentials: DanmakuCredentials
     private let session: URLSession
-    private static let baseURL = "https://api.dandanplay.net"
+    /// API 端点。官方为 https://api.dandanplay.net；若凭据来自第三方兼容服务，
+    /// 构造时传入其地址（协议相同，仅域名不同）
+    private let baseURL: String
 
-    public init(credentials: DanmakuCredentials, session: URLSession = URLSession.shared) {
+    public init(credentials: DanmakuCredentials, session: URLSession = URLSession.shared,
+                baseURL: String = "https://api.dandanplay.net") {
         self.credentials = credentials
         self.session = session
+        self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
     }
 
     // MARK: - API
@@ -92,7 +96,7 @@ public final class DandanplayClient: @unchecked Sendable {
         method: String, path: String, query: [(String, String)] = [], json: [String: Any]? = nil
     ) throws -> URLRequest {
         guard credentials.isConfigured else { throw DanmakuError.notConfigured }
-        guard var comps = URLComponents(string: Self.baseURL + path) else {
+        guard var comps = URLComponents(string: baseURL + path) else {
             throw DanmakuError.badResponse
         }
         if !query.isEmpty {

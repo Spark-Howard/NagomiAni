@@ -43,6 +43,12 @@ final class DanmakuController: ObservableObject {
 
     static let appIdKey = "danmaku.appId"
     static let appSecretKey = "danmaku.appSecret"
+    /// 弹幕 API 服务器地址（默认官方 api.dandanplay.net；第三方兼容服务可改）
+    static let baseURLKey = "danmaku.baseURL"
+
+    var baseURLText: String {
+        UserDefaults.standard.string(forKey: Self.baseURLKey) ?? "https://api.dandanplay.net"
+    }
 
     private var currentContext: Context?
     private var currentKey: String?
@@ -109,7 +115,7 @@ final class DanmakuController: ObservableObject {
     }
 
     private func runPrepare(_ context: Context) async {
-        let client = DandanplayClient(credentials: credentials())
+        let client = DandanplayClient(credentials: credentials(), baseURL: baseURLText)
         do {
             let episodeId: Int
             switch context.kind {

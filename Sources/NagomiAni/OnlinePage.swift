@@ -214,11 +214,14 @@ struct OnlinePage: View {
         .task(id: "\(show.id)-subject") { await model.ensureSubject(for: show) }
     }
 
-    /// 已关联显示 Bangumi 封面，否则用占位图标
+    /// 行封面：聚合条目自带 Bangumi 封面 → 已关联条目的封面 → 占位图标
     @ViewBuilder
     private func coverView(_ show: OnlineShow) -> some View {
-        if let subject = boundSubject(show),
-           let url = SearchPage.imageURL(subject.images?.common) {
+        if let url = show.coverURL.flatMap(SearchPage.imageURL) {
+            CoverImageView(url: url, cornerRadius: 4)
+                .frame(width: 44, height: 60)
+        } else if let subject = boundSubject(show),
+                  let url = SearchPage.imageURL(subject.images?.common) {
             CoverImageView(url: url, cornerRadius: 4)
                 .frame(width: 44, height: 60)
         } else {

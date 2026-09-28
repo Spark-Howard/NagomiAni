@@ -169,7 +169,8 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
                 providerID: providerID,
                 showID: vodID,
                 title: video.name?.isEmpty == false ? video.name! : "未命名",
-                subtitle: subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: " · ")
+                subtitle: subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: " · "),
+                coverURL: video.pic
             )
         }
     }

@@ -332,16 +332,65 @@ final class OnlineStore: ObservableObject {
         isLoadingShows = true
         defer { isLoadingShows = false }
         var all: [OnlineShow] = []
-        for provider in providers {
-            do {
-                all.append(contentsOf: try await provider.listShows())
-            } catch {
-                statusMessage = "\(provider.displayName) 加载失败：\(error.localizedDescription)"
+        let maccms = providers.compactMap { $0 as? MacCMSProvider }
+
+        // 默认目录 = Bangumi 放送日历（过去一周更新的番）× 各站最新动漫池：
+        // 每部放送中的番只保留一个条目、一个片源（WeeklyAggregator 按标题相似度匹配）
+        if let calendar = await loadWeeklyCalendar() {
+            var pool: [OnlineShow] = []
+            for provider in maccms {
+                do {
+                    pool += try await provider.listShows() // 已按动漫类目过滤
+                } catch {
+                    statusMessage = "\(provider.displayName) 最新动漫加载失败：\(error.localizedDescription)"
+                }
             }
+            all = WeeklyAggregator.aggregate(calendar: calendar, pool: pool)
+            if all.isEmpty {
+                statusMessage = "放送日历里的番暂未在资源站找到片源，可用上方搜索按剧名查找"
+            }
+        } else {
+            // 日历不可用（无网络/接口失败）→ 退回各站最新目录的旧形态
+            for provider in maccms {
+                do {
+                    all += try await provider.listShows()
+                } catch {
+                    statusMessage = "\(provider.displayName) 加载失败：\(error.localizedDescription)"
+                }
+            }
+        }
+        // 样例源永远保留在末尾（全链路演示/兜底）
+        if let mock = providers.first(where: { $0 is MockProvider }) {
+            all += (try? await mock.listShows()) ?? []
         }
         shows = all
         registerKnownShows(all)
         showsLoaded = true
+    }
+
+    /// 拉取 Bangumi 放送日历并摊平为过去一周的放送剧目。
+    /// /calendar 是公开接口，未登录也用匿名客户端拉取。
+    private func loadWeeklyCalendar() async -> [CalendarSubject]? {
+        let client = await BangumiSession.makeClient() ?? BangumiClient()
+        do {
+            let days = try await client.calendar()
+            let sections = WeekSchedule.sections(from: days) // 已过滤动画类型
+            var seen: Set<Int> = []
+            var subjects: [CalendarSubject] = []
+            for section in sections {
+                for subject in section.items where seen.insert(subject.id).inserted {
+                    subjects.append(CalendarSubject(
+                        id: subject.id,
+                        title: subject.displayName,
+                        coverURL: subject.images?.common
+                    ))
+                }
+            }
+            return subjects
+        } catch {
+            statusMessage = "放送日历加载失败，已回退到站点目录：\(error.localizedDescription)"
+            return nil
+        }
     }
 
     /// 展开番条目/行出现时加载集列表（幂等）

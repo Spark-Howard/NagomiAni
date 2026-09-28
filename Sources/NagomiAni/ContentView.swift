@@ -73,6 +73,10 @@ struct ContentView: View {
             continueWatchingRevision += 1
         }
         .onChange(of: account.isLoggedIn) { loggedIn in
+            if loggedIn {
+                // 登录成功：补同步离线/未登录期间积压的"看过"记录
+                Task { await model.flushPendingWatchedIfPossible() }
+            }
             // 统一登录完成后（无论从收藏页还是聊天页发起）：回到发起页并清空待处理目标
             guard loggedIn, let target = loginReturnTarget else { return }
             loginReturnTarget = nil

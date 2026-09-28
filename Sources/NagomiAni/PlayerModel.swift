@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Network
 import UniformTypeIdentifiers
 import NagomiAniCore
 
@@ -93,6 +94,8 @@ final class PlayerModel: ObservableObject {
     /// 防止起播瞬间的小位置覆盖旧记录（用户手动 seek 即视为放弃该目标）
     private var pendingResumeTarget: Double?
     private var terminateObserver: NSObjectProtocol?
+    /// 网络状态监听：离线积压的"看过"记录在联网恢复时自动补同步
+    private let networkMonitor = NWPathMonitor()
 
     init() {
         engine.delegate = self
@@ -104,6 +107,18 @@ final class PlayerModel: ObservableObject {
             MainActor.assumeIsolated {
                 self?.flushResume(force: true)
             }
+        }
+
+        // 离线待同步队列：启动时冲一次；联网恢复时自动补同步
+        networkMonitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor [weak self] in
+                await self?.flushPendingWatchedIfPossible()
+            }
+        }
+        networkMonitor.start(queue: DispatchQueue(label: "nagomiani.network.monitor"))
+        Task { [weak self] in
+            await self?.flushPendingWatchedIfPossible()
         }
     }
 
@@ -307,23 +322,109 @@ final class PlayerModel: ObservableObject {
         // 已按"看完"处理：清除续播记录，下次从头播
         clearResume()
         Task {
+            // subjectID 是本地绑定表查询，不需要网络——离线也能先入待同步队列
+            let subjectID = bindingID(for: seriesKey)
             do {
                 guard let client = await bangumiClient() else {
-                    syncMessage = "未登录，本集未能同步到 Bangumi"
+                    // 未登录/离线：入队待同步（登录或联网后自动补同步）
+                    if let subjectID {
+                        enqueuePendingWatched(subjectID: subjectID, episodeNumber: episode)
+                        syncMessage = "暂时无法连接 Bangumi，已记录待同步（待同步 \(Self.loadPendingWatchedMarks().count) 条）"
+                    } else {
+                        syncMessage = "未登录，本集未能同步到 Bangumi"
+                    }
                     return
                 }
-                guard let subjectID = bindingID(for: seriesKey) else { return }
+                guard let subjectID else { return }
                 let eps = try await client.episodes(subjectID: subjectID, type: 0, limit: 300)
                 guard let ep = eps.data.first(where: { Int(($0.sort ?? 0).rounded()) == episode }) else {
+                    // 永久性失败（条目里没有该集）：不入队，避免无限重试
                     syncMessage = "在 Bangumi 上未找到第 \(episode) 集，跳过同步"
                     return
                 }
                 try await client.markEpisodes(subjectID: subjectID, episodeIDs: [ep.id], type: .watched)
                 syncMessage = "已同步：第 \(episode) 集标记为看过 ✓"
+                // 同步成功顺带冲刷积压的离线记录
+                await flushPendingWatchedMarks(client: client)
             } catch {
-                syncMessage = "同步失败：\(Self.describe(error))"
+                // 网络/服务端错误：入队待同步，联网后自动补
+                if let subjectID {
+                    enqueuePendingWatched(subjectID: subjectID, episodeNumber: episode)
+                    syncMessage = "同步失败（已记录待重试，共 \(Self.loadPendingWatchedMarks().count) 条）：\(Self.describe(error))"
+                } else {
+                    syncMessage = "同步失败：\(Self.describe(error))"
+                }
             }
         }
+    }
+
+    // MARK: - 离线待同步队列
+
+    /// 一条待补同步的"看过"记录
+    struct PendingWatchedMark: Codable {
+        let subjectID: Int
+        let episodeNumber: Int
+        let queuedAt: Date
+    }
+
+    private static let pendingWatchedKey = "bangumi.pendingWatchedMarks"
+    /// 队列容量上限（超出丢弃最旧，防无限膨胀）
+    private static let pendingWatchedCapacity = 200
+
+    static func loadPendingWatchedMarks() -> [PendingWatchedMark] {
+        guard let data = UserDefaults.standard.data(forKey: pendingWatchedKey),
+              let marks = try? JSONDecoder().decode([PendingWatchedMark].self, from: data) else { return [] }
+        return marks
+    }
+
+    private static func savePendingWatchedMarks(_ marks: [PendingWatchedMark]) {
+        let trimmed = marks.suffix(pendingWatchedCapacity)
+        if let data = try? JSONEncoder().encode(Array(trimmed)) {
+            UserDefaults.standard.set(data, forKey: pendingWatchedKey)
+        }
+    }
+
+    /// 同一 subject+episode 只保留一条（重复看完不重复入队）
+    private func enqueuePendingWatched(subjectID: Int, episodeNumber: Int) {
+        var marks = Self.loadPendingWatchedMarks()
+        if marks.contains(where: { $0.subjectID == subjectID && $0.episodeNumber == episodeNumber }) {
+            return
+        }
+        marks.append(PendingWatchedMark(subjectID: subjectID, episodeNumber: episodeNumber, queuedAt: Date()))
+        Self.savePendingWatchedMarks(marks)
+    }
+
+    /// 补同步积压记录：逐条拉集数表并标记；仍失败的保留在队列
+    private func flushPendingWatchedMarks(client: BangumiClient) async {
+        let pending = Self.loadPendingWatchedMarks()
+        guard !pending.isEmpty else { return }
+        var remaining: [PendingWatchedMark] = []
+        var synced = 0
+        for mark in pending {
+            do {
+                let eps = try await client.episodes(subjectID: mark.subjectID, type: 0, limit: 300)
+                guard let ep = eps.data.first(where: { Int(($0.sort ?? 0).rounded()) == mark.episodeNumber }) else {
+                    continue // 条目里没有该集（永久性失败）：丢弃
+                }
+                try await client.markEpisodes(subjectID: mark.subjectID, episodeIDs: [ep.id], type: .watched)
+                synced += 1
+                // 尊重 bgm.tv 频率限制
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            } catch {
+                remaining.append(mark) // 网络/权限仍失败：留在队列下次再试
+            }
+        }
+        Self.savePendingWatchedMarks(remaining)
+        if synced > 0 {
+            syncMessage = "已补同步 \(synced) 条离线观看记录 ✓"
+        }
+    }
+
+    /// 可同步时冲刷积压（联网恢复 / 登录成功 / 播放同步成功后调用）
+    func flushPendingWatchedIfPossible() async {
+        guard !Self.loadPendingWatchedMarks().isEmpty,
+              let client = await bangumiClient() else { return }
+        await flushPendingWatchedMarks(client: client)
     }
 
     // MARK: - 断点续播

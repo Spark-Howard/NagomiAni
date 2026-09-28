@@ -120,8 +120,23 @@ struct OnlinePage: View {
     private var showList: some View {
         ScrollView {
             LazyVStack(spacing: 6) {
-                ForEach(list) { show in
-                    showRow(show)
+                if model.isCalendarMode, model.onlineSearchResults == nil {
+                    // 放送日历模式：按「今天 → 前 6 天」分组，与 Bangumi 过去一周完全一致
+                    ForEach(model.weeklySections) { section in
+                        NagomiSectionHeader(
+                            title: section.title == "今天"
+                                ? "今天 · \(section.dateText)"
+                                : "\(section.title) \(section.dateText)",
+                            systemImage: "calendar"
+                        )
+                        ForEach(section.shows) { show in
+                            showRow(show)
+                        }
+                    }
+                } else {
+                    ForEach(list) { show in
+                        showRow(show)
+                    }
                 }
             }
         }

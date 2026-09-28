@@ -44,31 +44,42 @@ public enum WeeklyAggregator {
         var usedPoolIDs: Set<String> = []
         var result: [OnlineShow] = []
         for subject in calendar {
-            var best: (show: OnlineShow, score: Double)?
-            for candidate in uniquePool where !usedPoolIDs.contains(candidate.id) {
-                // ⚠️ 相似度比较必须用清洗后的候选标题：资源站标题普遍带
-                // [字幕组]/[1080p] 标签，不清洗则永远匹配不上 Bangumi 正题
-                var score = TitleSimilarity.similarity(subject.title, normalize(candidate.title))
-                if let calendarSeason = MediaMatching.seasonNumber(from: subject.title),
-                   let poolSeason = MediaMatching.seasonNumber(from: candidate.title),
-                   calendarSeason == poolSeason {
-                    score += seasonBonus
-                }
-                if score >= matchThreshold, score > (best?.score ?? 0) {
-                    best = (candidate, score)
-                }
-            }
-            guard let match = best else { continue }
+            guard let match = bestMatch(subject, in: uniquePool.filter { !usedPoolIDs.contains($0.id) }) else { continue }
             usedPoolIDs.insert(match.show.id)
-            result.append(OnlineShow(
-                providerID: match.show.providerID,
-                showID: match.show.showID,
-                title: subject.title,
-                subtitle: match.show.subtitle,
-                coverURL: subject.coverURL
-            ))
+            result.append(Self.makeEntry(subject: subject, source: match.show))
         }
         return result
+    }
+
+    /// 为一部放送番在候选池里选最佳片源（标题相似度阈值 + 同季加分）；找不到返回 nil
+    public static func bestMatch(_ subject: CalendarSubject, in candidates: [OnlineShow]) -> (show: OnlineShow, score: Double)? {
+        var best: (show: OnlineShow, score: Double)?
+        for candidate in candidates {
+            // ⚠️ 相似度比较必须用清洗后的候选标题：资源站标题普遍带
+            // [字幕组]/[1080p] 标签，不清洗则永远匹配不上 Bangumi 正题
+            var score = TitleSimilarity.similarity(subject.title, normalize(candidate.title))
+            if let calendarSeason = MediaMatching.seasonNumber(from: subject.title),
+               let poolSeason = MediaMatching.seasonNumber(from: candidate.title),
+               calendarSeason == poolSeason {
+                score += seasonBonus
+            }
+            if score >= matchThreshold, score > (best?.score ?? 0) {
+                best = (candidate, score)
+            }
+        }
+        return best
+    }
+
+    /// 聚合条目：Bangumi 正题/封面/subjectID + 命中站点的流
+    public static func makeEntry(subject: CalendarSubject, source: OnlineShow) -> OnlineShow {
+        OnlineShow(
+            providerID: source.providerID,
+            showID: source.showID,
+            title: subject.title,
+            subtitle: source.subtitle,
+            coverURL: subject.coverURL,
+            bangumiSubjectID: subject.id
+        )
     }
 
     /// 标题归一化：清洗字幕组/画质标签 + 相似度的空白标点归一

@@ -327,69 +327,181 @@ final class OnlineStore: ObservableObject {
 
     // MARK: - 目录
 
+    // MARK: - 目录（放送日历聚合：与 Bangumi「最近更新（过去一周）」同一套剧目）
+
+    /// 放送日历聚合结果的一天分组（与搜索页「过去一周」同构）
+    struct WeeklyShowSection: Codable, Identifiable {
+        let id: String // yyyy-MM-dd
+        let title: String // 今天/周一…
+        let dateText: String // 9月28日
+        let shows: [OnlineShow]
+    }
+
+    static let weeklyCacheKey = "online.weekly.cache"
+
+    /// 非 nil 且 isCalendarMode 时，目录按天分组展示
+    @Published private(set) var weeklySections: [WeeklyShowSection] = []
+    /// true = 目录来自放送日历聚合；false = 回退的站点目录
+    @Published private(set) var isCalendarMode = false
+
     func loadShowsIfNeeded() async {
         guard !showsLoaded, !isLoadingShows else { return }
         isLoadingShows = true
         defer { isLoadingShows = false }
-        var all: [OnlineShow] = []
-        let maccms = providers.compactMap { $0 as? MacCMSProvider }
 
-        // 默认目录 = Bangumi 放送日历（过去一周更新的番）× 各站最新动漫池：
-        // 每部放送中的番只保留一个条目、一个片源（WeeklyAggregator 按标题相似度匹配）
-        if let calendar = await loadWeeklyCalendar() {
-            var pool: [OnlineShow] = []
-            for provider in maccms {
-                do {
-                    pool += try await provider.listShows() // 已按动漫类目过滤
-                } catch {
-                    statusMessage = "\(provider.displayName) 最新动漫加载失败：\(error.localizedDescription)"
+        // 当天缓存：放送周内同一天再进页面零请求（与搜索页"过去一周"缓存同语义）
+        let today = WeekSchedule.dateKey(Date())
+        if let cached = loadWeeklyCache(), cached.fetchedOn == today {
+            applyWeeklySections(cached.sections)
+            showsLoaded = true
+            return
+        }
+
+        // 1) 放送日历（/calendar 公开接口，匿名客户端即可）
+        let client = await BangumiSession.makeClient() ?? BangumiClient()
+        guard let days = try? await client.calendar(), !days.isEmpty else {
+            statusMessage = "放送日历加载失败，已回退到站点目录"
+            await loadFallbackDirectory()
+            showsLoaded = true
+            return
+        }
+        let sections = WeekSchedule.sections(from: days) // 已过滤动画类型
+        var sectionMeta: [(id: String, title: String, dateText: String)] = []
+        var flatSubjects: [(sectionIndex: Int, subject: CalendarSubject)] = []
+        var seenSubjects: Set<Int> = []
+        for (index, section) in sections.enumerated() {
+            sectionMeta.append((section.id, section.title, section.dateText))
+            for subject in section.items where seenSubjects.insert(subject.id).inserted {
+                flatSubjects.append((index, CalendarSubject(
+                    id: subject.id, title: subject.displayName, coverURL: subject.images?.common
+                )))
+            }
+        }
+
+        // 2) 池子先兜（各站最新一页，便宜），能直接匹配的直接用
+        let maccms = providers.compactMap { $0 as? MacCMSProvider }
+        var pool: [OnlineShow] = []
+        for provider in maccms {
+            pool += (try? await provider.listShows()) ?? []
+        }
+        var results: [Int: OnlineShow] = [:] // subjectID → 聚合条目
+        for item in flatSubjects {
+            if let match = WeeklyAggregator.bestMatch(item.subject, in: pool) {
+                results[item.subject.id] = WeeklyAggregator.makeEntry(subject: item.subject, source: match.show)
+            }
+        }
+
+        // 3) 未匹配的逐番搜索资源站（并发 4，命中即停）——"最新一页"覆盖不了全部放送番
+        let unmatched = flatSubjects.filter { results[$0.subject.id] == nil }
+        let total = unmatched.count
+        if !unmatched.isEmpty {
+            var done = 0
+            statusMessage = "正在为放送番匹配片源 0/\(total)…"
+            await withTaskGroup(of: (Int, OnlineShow?).self) { group in
+                var inFlight = 0
+                for item in unmatched {
+                    if inFlight >= 4 {
+                        if let (id, show) = await group.next() {
+                            done += 1
+                            if let show { results[id] = show }
+                            statusMessage = "正在为放送番匹配片源 \(done)/\(total)…"
+                        }
+                        inFlight -= 1
+                    }
+                    inFlight += 1
+                    group.addTask {
+                        for provider in maccms { // 站点优先级：内置顺序
+                            guard let hits = try? await provider.search(keyword: item.subject.title) else { continue }
+                            if let match = WeeklyAggregator.bestMatch(item.subject, in: hits) {
+                                return (item.subject.id, WeeklyAggregator.makeEntry(subject: item.subject, source: match.show))
+                            }
+                        }
+                        return (item.subject.id, nil)
+                    }
                 }
-            }
-            all = WeeklyAggregator.aggregate(calendar: calendar, pool: pool)
-            if all.isEmpty {
-                statusMessage = "放送日历里的番暂未在资源站找到片源，可用上方搜索按剧名查找"
-            }
-        } else {
-            // 日历不可用（无网络/接口失败）→ 退回各站最新目录的旧形态
-            for provider in maccms {
-                do {
-                    all += try await provider.listShows()
-                } catch {
-                    statusMessage = "\(provider.displayName) 加载失败：\(error.localizedDescription)"
+                while let (id, show) = await group.next() {
+                    done += 1
+                    if let show { results[id] = show }
+                    statusMessage = "正在为放送番匹配片源 \(done)/\(total)…"
                 }
             }
         }
-        // 样例源永远保留在末尾（全链路演示/兜底）
-        if let mock = providers.first(where: { $0 is MockProvider }) {
-            all += (try? await mock.listShows()) ?? []
+
+        // 4) 组装分组 + 自动关联 + 当天缓存
+        var weekly: [WeeklyShowSection] = []
+        for (index, meta) in sectionMeta.enumerated() {
+            let shows = flatSubjects.filter { $0.sectionIndex == index }.compactMap { results[$0.subject.id] }
+            if !shows.isEmpty {
+                weekly.append(WeeklyShowSection(id: meta.id, title: meta.title, dateText: meta.dateText, shows: shows))
+            }
         }
-        shows = all
-        registerKnownShows(all)
+        autoBindCalendarShows(weekly.flatMap(\.shows))
+        applyWeeklySections(weekly)
+        saveWeeklyCache(sections: weekly, fetchedOn: today)
+        if weekly.isEmpty {
+            statusMessage = "放送日历里的番暂未在资源站找到片源，可用上方搜索按剧名查找"
+        }
         showsLoaded = true
     }
 
-    /// 拉取 Bangumi 放送日历并摊平为过去一周的放送剧目。
-    /// /calendar 是公开接口，未登录也用匿名客户端拉取。
-    private func loadWeeklyCalendar() async -> [CalendarSubject]? {
-        let client = await BangumiSession.makeClient() ?? BangumiClient()
-        do {
-            let days = try await client.calendar()
-            let sections = WeekSchedule.sections(from: days) // 已过滤动画类型
-            var seen: Set<Int> = []
-            var subjects: [CalendarSubject] = []
-            for section in sections {
-                for subject in section.items where seen.insert(subject.id).inserted {
-                    subjects.append(CalendarSubject(
-                        id: subject.id,
-                        title: subject.displayName,
-                        coverURL: subject.images?.common
-                    ))
-                }
+    /// 放送日历条目自动关联 Bangumi（2026-09-27 用户决策：日历自带精确 subjectID，
+    /// 不再要求手动关联）。已有的手动绑定不覆盖；解除后重载也不会再自动绑（除非换番）。
+    private func autoBindCalendarShows(_ shows: [OnlineShow]) {
+        var ids = UserDefaults.standard.dictionary(forKey: PlayerModel.bindingsKey) as? [String: Int] ?? [:]
+        var names = UserDefaults.standard.dictionary(forKey: PlayerModel.boundNamesKey) as? [String: String] ?? [:]
+        var changed = false
+        for show in shows {
+            guard let subjectID = show.bangumiSubjectID else { continue }
+            let key = show.seriesKey
+            if ids[key] == nil {
+                ids[key] = subjectID
+                names[key] = show.title
+                changed = true
             }
-            return subjects
-        } catch {
-            statusMessage = "放送日历加载失败，已回退到站点目录：\(error.localizedDescription)"
-            return nil
+        }
+        guard changed else { return }
+        UserDefaults.standard.set(ids, forKey: PlayerModel.bindingsKey)
+        UserDefaults.standard.set(names, forKey: PlayerModel.boundNamesKey)
+    }
+
+    private func applyWeeklySections(_ sections: [WeeklyShowSection]) {
+        weeklySections = sections
+        isCalendarMode = true
+        let all = sections.flatMap(\.shows)
+        shows = all
+        registerKnownShows(all)
+    }
+
+    /// 日历不可用（无网络/接口失败）→ 回退各站最新目录的旧形态
+    private func loadFallbackDirectory() async {
+        isCalendarMode = false
+        weeklySections = []
+        var all: [OnlineShow] = []
+        for provider in providers {
+            do {
+                all += try await provider.listShows()
+            } catch {
+                statusMessage = "\(provider.displayName) 加载失败：\(error.localizedDescription)"
+            }
+        }
+        shows = all
+        registerKnownShows(all)
+    }
+
+    private struct WeeklyCache: Codable {
+        let fetchedOn: String
+        let sections: [WeeklyShowSection]
+    }
+
+    private func loadWeeklyCache() -> (fetchedOn: String, sections: [WeeklyShowSection])? {
+        guard let data = UserDefaults.standard.data(forKey: Self.weeklyCacheKey),
+              let cache = try? JSONDecoder().decode(WeeklyCache.self, from: data) else { return nil }
+        return (cache.fetchedOn, cache.sections)
+    }
+
+    private func saveWeeklyCache(sections: [WeeklyShowSection], fetchedOn: String) {
+        if let data = try? JSONEncoder().encode(WeeklyCache(fetchedOn: fetchedOn, sections: sections)) {
+            UserDefaults.standard.set(data, forKey: Self.weeklyCacheKey)
         }
     }
 

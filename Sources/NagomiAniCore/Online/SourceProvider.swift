@@ -11,15 +11,19 @@ public struct OnlineShow: Identifiable, Codable, Sendable, Hashable {
     public let subtitle: String?
     /// 封面图（聚合条目来自 Bangumi，资源站条目来自站点图床）
     public let coverURL: String?
+    /// 放送日历聚合条目对应的 Bangumi 条目 ID（自动关联用；普通站点条目为 nil）
+    public let bangumiSubjectID: Int?
 
     public var id: String { "\(providerID):\(showID)" }
 
-    public init(providerID: String, showID: String, title: String, subtitle: String? = nil, coverURL: String? = nil) {
+    public init(providerID: String, showID: String, title: String, subtitle: String? = nil,
+                coverURL: String? = nil, bangumiSubjectID: Int? = nil) {
         self.providerID = providerID
         self.showID = showID
         self.title = title
         self.subtitle = subtitle
         self.coverURL = coverURL
+        self.bangumiSubjectID = bangumiSubjectID
     }
 
     /// 与 Bangumi 绑定/续播共用的合成 seriesKey

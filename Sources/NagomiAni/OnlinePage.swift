@@ -42,6 +42,9 @@ struct OnlinePage: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             searchBar
+            if !model.cachedItems.isEmpty {
+                cachedSection
+            }
             content
             if let message = model.statusMessage {
                 Text(message)
@@ -106,6 +109,104 @@ struct OnlinePage: View {
     private func searchOnline() {
         let keyword = searchKeyword
         Task { await model.searchOnline(keyword) }
+    }
+
+    // MARK: - 我的缓存（跨番聚合的已缓存分集）
+
+    private var cachedSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.doc.fill")
+                    .font(.footnote)
+                    .foregroundStyle(NagomiTheme.accent)
+                Text("我的缓存")
+                    .font(.headline)
+                Text("\(model.cachedItems.count) 集 · \(OnlineStore.formattedBytes(model.cacheTotalBytes))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(model.cachedItems) { item in
+                        cachedCard(item)
+                    }
+                }
+                .padding(.bottom, 4)
+            }
+        }
+    }
+
+    /// 缓存卡片：点击直接从本地副本播放；右键删除此缓存
+    private func cachedCard(_ item: CachedEpisodeItem) -> some View {
+        Button {
+            playCached(item)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                ZStack(alignment: .bottomLeading) {
+                    Group {
+                        if let url = item.show.coverURL.flatMap(SearchPage.imageURL) {
+                            CoverImageView(url: url, cornerRadius: 0)
+                        } else {
+                            Image(systemName: "play.tv")
+                                .font(.system(size: 28))
+                                .foregroundStyle(NagomiTheme.accent)
+                                .frame(width: Self.coverWidth, height: Self.coverHeight)
+                                .background(NagomiTheme.accentSoft)
+                        }
+                    }
+                    .frame(width: Self.coverWidth, height: Self.coverHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                    Text("第 \(item.episode.number) 集")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.black.opacity(0.65), in: Capsule())
+                        .foregroundStyle(.white)
+                        .padding(6)
+                }
+                .overlay(alignment: .topTrailing) {
+                    Text(OnlineStore.formattedBytes(item.sizeBytes))
+                        .font(.caption2)
+                        .monospacedDigit()
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .foregroundStyle(.white)
+                        .padding(4)
+                }
+
+                Text(item.show.title)
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: Self.coverWidth, alignment: .leading)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) {
+                model.removeCache(for: item.episode)
+            } label: {
+                Label("删除此缓存", systemImage: "trash")
+            }
+        }
+    }
+
+    /// 缓存点播：preparePlayback 优先返回本地副本，续播位置自动恢复
+    private func playCached(_ item: CachedEpisodeItem) {
+        Task {
+            do {
+                let target = try await model.preparePlayback(show: item.show, episode: item.episode)
+                onPlay(target)
+            } catch {
+                model.statusMessage = "播放失败：\(error.localizedDescription)"
+            }
+        }
     }
 
     @ViewBuilder

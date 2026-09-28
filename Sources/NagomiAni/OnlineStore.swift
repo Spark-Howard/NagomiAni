@@ -70,6 +70,7 @@ final class OnlineStore: ObservableObject {
            let entries = try? JSONDecoder().decode([OnlineLibraryEntry].self, from: data) {
             libraryEntries = entries
         }
+        loadKnownShows()
         rebuildProviders()
     }
 
@@ -655,8 +656,48 @@ final class OnlineStore: ObservableObject {
     }
 
     private func registerKnownShows(_ newShows: [OnlineShow]) {
+        var changed = false
         for show in newShows {
-            knownShows[show.seriesKey] = show
+            if knownShows[show.seriesKey] != show {
+                knownShows[show.seriesKey] = show
+                changed = true
+            }
+        }
+        if changed {
+            persistKnownShows()
+        }
+    }
+
+    // 番注册表持久化（UserDefaults）：重启后缓存区块/继续观看仍能认出
+    // "这集缓存属于哪部番"，不依赖当次会话是否浏览过
+    private struct KnownShowRecord: Codable {
+        let providerID: String
+        let showID: String
+        let title: String
+        let subtitle: String?
+        let coverURL: String?
+    }
+
+    static let knownShowsKey = "online.known.shows"
+
+    private func persistKnownShows() {
+        let records = knownShows.values.map {
+            KnownShowRecord(providerID: $0.providerID, showID: $0.showID,
+                            title: $0.title, subtitle: $0.subtitle, coverURL: $0.coverURL)
+        }
+        if let data = try? JSONEncoder().encode(records) {
+            UserDefaults.standard.set(data, forKey: Self.knownShowsKey)
+        }
+    }
+
+    private func loadKnownShows() {
+        guard let data = UserDefaults.standard.data(forKey: Self.knownShowsKey),
+              let records = try? JSONDecoder().decode([KnownShowRecord].self, from: data) else { return }
+        for record in records {
+            knownShows[OnlineShow.seriesKey(providerID: record.providerID, showID: record.showID)] = OnlineShow(
+                providerID: record.providerID, showID: record.showID,
+                title: record.title, subtitle: record.subtitle, coverURL: record.coverURL
+            )
         }
     }
 
@@ -670,6 +711,8 @@ final class OnlineStore: ObservableObject {
     private let cache = StreamCache()
     /// 已完整缓存的 resumeKey 集合
     @Published private(set) var cachedKeys: Set<String> = []
+    /// 「我的缓存」聚合条目（跨番）
+    @Published private(set) var cachedItems: [CachedEpisodeItem] = []
     /// 下载中的 resumeKey → 进度（含字节级：已下载/总大小，总大小可能未知）
     @Published private(set) var cacheProgress: [String: StreamCache.Progress] = [:]
     /// 已缓存条目的磁盘占用（resumeKey → 字节）
@@ -710,6 +753,27 @@ final class OnlineStore: ObservableObject {
             }
         }
         cacheSizes = sizes
+        rebuildCachedItems()
+    }
+
+    /// 从已缓存 key 聚合「我的缓存」条目（按番名+集号排序；番未知的跳过）
+    private func rebuildCachedItems() {
+        cachedItems = cachedKeys.compactMap { key -> CachedEpisodeItem? in
+            guard key.hasPrefix("online:") else { return nil }
+            let parts = key.dropFirst("online:".count).split(separator: ":").map(String.init)
+            guard parts.count == 3, let number = Int(parts[2]) else { return nil }
+            let seriesKey = String(key.dropLast(":\(number)".count))
+            guard let show = knownShows[seriesKey]
+                ?? libraryEntries.first(where: {
+                    $0.providerID == parts[0] && $0.showID == parts[1]
+                })?.asShow else { return nil }
+            let episode = OnlineEpisode(providerID: show.providerID, showID: show.showID, number: number)
+            return CachedEpisodeItem(id: key, show: show, episode: episode, sizeBytes: cacheSizes[key] ?? 0)
+        }
+        .sorted { lhs, rhs in
+            if lhs.show.title != rhs.show.title { return lhs.show.title < rhs.show.title }
+            return lhs.episode.number < rhs.episode.number
+        }
     }
 
     /// 手动缓存一集（HLS 走分片下载 + 本地 playlist；渐进式走整文件流式落盘）
@@ -749,6 +813,7 @@ final class OnlineStore: ObservableObject {
                 cacheProgress[key] = nil
                 cacheSizes[key] = cache.sizeBytes(for: key)
                 cacheTotalBytes = cache.totalBytes()
+                rebuildCachedItems()
                 statusMessage = "已缓存「\(show.title) 第 \(episode.number) 集」"
             } catch is CancellationError {
                 cacheProgress[key] = nil
@@ -769,6 +834,7 @@ final class OnlineStore: ObservableObject {
         cachedKeys.remove(episode.resumeKey)
         cacheSizes[episode.resumeKey] = nil
         cacheTotalBytes = cache.totalBytes()
+        rebuildCachedItems()
     }
 
     func clearAllCache() {
@@ -777,6 +843,7 @@ final class OnlineStore: ObservableObject {
         cacheSizes.removeAll()
         cacheTotalBytes = 0
         statusMessage = "已清除全部缓存"
+        rebuildCachedItems()
     }
 
     static func formattedBytes(_ bytes: Int64) -> String {
@@ -829,4 +896,12 @@ struct OnlineLibraryEntry: Codable, Identifiable, Equatable {
     var asShow: OnlineShow {
         OnlineShow(providerID: providerID, showID: showID, title: title, subtitle: subtitle)
     }
+}
+
+/// 「我的缓存」区块条目：跨番聚合的已缓存分集
+struct CachedEpisodeItem: Identifiable {
+    let id: String // resumeKey
+    let show: OnlineShow
+    let episode: OnlineEpisode
+    let sizeBytes: Int64
 }

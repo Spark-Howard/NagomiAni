@@ -121,48 +121,59 @@ struct ContentView: View {
         NSApp.windows.first(where: { $0.isVisible })?.title = title
     }
 
-    /// 继续观看卡片：resume.json 最近的可续播记录映射为本地/云端混排条目
+    /// 继续观看卡片：resume.json 最近的可续播记录映射为本地/云端混排条目。
+    /// **一部番只保留一张卡**（最后一次看的那集）；其余集的进度仍留在 resume.json，
+    /// 从番库点播对应集时依然从各自位置续播——这里只是展示层去重。
     private func continueWatchingItems() -> [ContinueWatchingItem] {
-        model.recentResumes(limit: 12).compactMap { item -> ContinueWatchingItem? in
-            let progress = item.duration > 0 ? min(item.position / item.duration, 1) : 0
-            if item.key.hasPrefix("online:") {
-                // 合成键 "online:provider:showID:number" → 番库收藏里的云端番
-                let parts = item.key.dropFirst("online:".count).split(separator: ":").map(String.init)
-                guard parts.count == 3, let number = Int(parts[2]) else { return nil }
+        var seenSeries: Set<String> = []
+        var items: [ContinueWatchingItem] = []
+        // snapshot 已按更新时间降序：每部番第一条即最新观看记录
+        for record in model.recentResumes(limit: 60) {
+            let progress = record.duration > 0 ? min(record.position / record.duration, 1) : 0
+
+            if record.key.hasPrefix("online:") {
+                // 合成键 "online:provider:showID:number" → 云端番
+                let parts = record.key.dropFirst("online:".count).split(separator: ":").map(String.init)
+                guard parts.count == 3, let number = Int(parts[2]) else { continue }
+                // resume 键 = seriesKey + ":集号"，去掉尾部即 seriesKey（一部番一张卡的分组键）
+                let seriesKey = String(record.key.dropLast(":\(number)".count))
+                guard seenSeries.insert(seriesKey).inserted else { continue }
                 // 优先番库收藏（有标题），否则回退到本会话见过的番（搜索结果点播的场景）
-                // resume 键 = seriesKey + ":集号"，去掉尾部即 seriesKey
-                let seriesKey = String(item.key.dropLast(":\(number)".count))
                 let show = online.knownShow(forSeriesKey: seriesKey)
                     ?? online.libraryEntries.first(where: {
                         $0.providerID == parts[0] && $0.showID == parts[1]
                     })?.asShow
-                guard let show else { return nil }
+                guard let show else { continue }
                 let episode = OnlineEpisode(providerID: show.providerID, showID: show.showID, number: number)
-                return ContinueWatchingItem(
-                    id: item.key,
+                items.append(ContinueWatchingItem(
+                    id: record.key,
                     title: show.title,
-                    subtitle: "第 \(number) 集 · 云端",
+                    subtitle: "上次看到第 \(number) 集 · 云端",
                     progress: progress,
-                    updatedAt: item.updatedAt,
+                    updatedAt: record.updatedAt,
                     action: .cloud(show: show, episode: episode)
-                )
+                ))
+            } else {
+                // 本地文件路径 → 番库系列（seriesKey = 目录路径，同样一部番一张卡）
+                let url = URL(fileURLWithPath: record.key)
+                guard let series = library.series.first(where: { $0.files.contains { $0.path == url.path } }) else {
+                    continue
+                }
+                guard seenSeries.insert(series.seriesKey).inserted else { continue }
+                let file = series.files.first { $0.path == url.path }
+                let subtitle = file?.episodeNumber.map { "上次看到第 \($0) 集 · 本地" } ?? "上次看到 · 本地"
+                items.append(ContinueWatchingItem(
+                    id: record.key,
+                    title: series.displayName,
+                    subtitle: subtitle,
+                    progress: progress,
+                    updatedAt: record.updatedAt,
+                    action: .local(url)
+                ))
             }
-            // 本地文件路径 → 番库系列
-            let url = URL(fileURLWithPath: item.key)
-            guard let series = library.series.first(where: { $0.files.contains { $0.path == url.path } }) else {
-                return nil
-            }
-            let file = series.files.first { $0.path == url.path }
-            let subtitle = file?.episodeNumber.map { "第 \($0) 集" } ?? url.lastPathComponent
-            return ContinueWatchingItem(
-                id: item.key,
-                title: series.displayName,
-                subtitle: subtitle + " · 本地",
-                progress: progress,
-                updatedAt: item.updatedAt,
-                action: .local(url)
-            )
+            if items.count >= 6 { break } // 最多 6 部
         }
+        return items
     }
 
     /// 全屏样式改动延后到下一 runloop 再执行。

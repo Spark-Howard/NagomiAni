@@ -33,6 +33,9 @@ final class DanmakuController: ObservableObject {
             if isEnabled, let context = currentContext {
                 prepare(context)
             } else if !isEnabled {
+                // 取消在途拉取，避免"关闭后加载完成又出现弹幕"
+                prepareTask?.cancel()
+                prepareTask = nil
                 clearTrack()
             }
         }
@@ -47,13 +50,17 @@ final class DanmakuController: ObservableObject {
     static let baseURLKey = "danmaku.baseURL"
 
     var baseURLText: String {
-        UserDefaults.standard.string(forKey: Self.baseURLKey) ?? "https://api.dandanplay.net"
+        let stored = UserDefaults.standard.string(forKey: Self.baseURLKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return stored.isEmpty ? "https://api.dandanplay.net" : stored
     }
 
     private var currentContext: Context?
     private var currentKey: String?
     private var commentsCache: [String: [DanmakuComment]] = [:] // key → 已拉取弹幕（同集切回不重复请求）
     private var prepareTask: Task<Void, Never>?
+    /// commentsCache 上限（弹幕体积大，防止连看几十集后无界增长）
+    private static let cacheLimit = 10
 
     func credentials() -> DanmakuCredentials {
         DanmakuCredentials(
@@ -84,23 +91,28 @@ final class DanmakuController: ObservableObject {
             apply(comments: cached)
             return
         }
+        if commentsCache.count >= Self.cacheLimit, let evict = commentsCache.keys.first(where: { $0 != context.key }) {
+            commentsCache.removeValue(forKey: evict)
+        }
         phase = .matching
         prepareTask = Task { [weak self] in
             await self?.runPrepare(context)
         }
     }
 
-    /// 手动重新获取当前集弹幕（忽略内存缓存）
+    /// 手动重新获取当前集弹幕（忽略内存缓存；清 currentKey 绕过同集 guard，否则 prepare 会直接返回）
     func refetch() {
         guard let context = currentContext else { return }
         commentsCache.removeValue(forKey: context.key)
+        currentKey = nil
         prepare(context)
     }
 
-    /// 设置保存后调用：用新凭据重新拉取当前集
+    /// 设置保存后调用：用新凭据重新拉取当前集（清 currentKey 绕过同集 guard）
     func refreshConfiguration() {
         guard let context = currentContext, isEnabled else { return }
         commentsCache.removeValue(forKey: context.key)
+        currentKey = nil
         prepare(context)
     }
 
@@ -128,7 +140,10 @@ final class DanmakuController: ObservableObject {
                 }
                 episodeId = info.episodeId
             case .local(let url):
-                let hash = try DandanplayClient.fileHash(url: url)
+                // 16MB 读盘 + MD5 可能耗时（NAS 卷可达秒级），放到后台线程避免卡主线程
+                let hash = try await Task.detached(priority: .utility) {
+                    try DandanplayClient.fileHash(url: url)
+                }.value
                 guard !Task.isCancelled, currentContext == context else { return }
                 let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
                 let info = try await client.match(fileName: url.lastPathComponent, fileHash: hash, fileSize: size)

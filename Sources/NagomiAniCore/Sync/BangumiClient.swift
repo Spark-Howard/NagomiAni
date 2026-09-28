@@ -151,6 +151,21 @@ public final class BangumiClient: @unchecked Sendable {
         return try await send(get("/v0/episodes", query: query))
     }
 
+    /// 拉取条目的全部本篇集数（按 offset 翻页——单页 300 上限会让
+    /// 海贼王/Doraemon 级长篇第 301 集起永远同步不上）
+    public func allEpisodes(subjectID: Int, type: Int? = 0) async throws -> [Episode] {
+        var all: [Episode] = []
+        var offset = 0
+        let pageSize = 300
+        while true {
+            let page = try await episodes(subjectID: subjectID, type: type, limit: pageSize, offset: offset)
+            all.append(contentsOf: page.data)
+            if page.data.count < pageSize { break }
+            offset += pageSize
+        }
+        return all
+    }
+
     /// 批量标记单集收藏（PATCH /v0/users/-/collections/{subject_id}/episodes）
     /// 官方会同时重算条目完成度，这是动画进度同步的正确姿势
     public func markEpisodes(subjectID: Int, episodeIDs: [Int], type: EpisodeCollectionType) async throws {
@@ -181,7 +196,8 @@ public final class BangumiClient: @unchecked Sendable {
         guard let url = comps.url else { throw BangumiError.invalidURL }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 20
+        // 不设 per-request 超时，沿用 session 的 30s（搜索等重接口依赖放宽的超时；
+        // URLRequest 级的 20s 会覆盖 session 配置，令放宽失效）
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let token = accessToken {
@@ -197,6 +213,10 @@ public final class BangumiClient: @unchecked Sendable {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError() // 任务取消不重试、不当网络错误上报
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
             if attempt < Self.maxRetries {
                 let delay = UInt64(1_000_000_000 * Double(attempt + 1))
@@ -221,6 +241,10 @@ public final class BangumiClient: @unchecked Sendable {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError() // 任务取消不重试、不当网络错误上报
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch {
             if attempt < Self.maxRetries {
                 let delay = UInt64(1_000_000_000 * Double(attempt + 1))

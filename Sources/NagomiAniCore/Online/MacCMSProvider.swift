@@ -178,14 +178,18 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
     /// 详情响应 → OnlineEpisode（带 streamHint 与全部线路，点播免二次请求）
     static func episodes(from data: Data, providerID: String, showID: String) throws -> [OnlineEpisode] {
         let response = try decodeList(data)
-        guard let video = response.list.first(where: { $0.vodID == showID }) ?? response.list.first else {
+        // 匹配不到目标 vodID 直接返回空：站点异常时兜底取第一条会把
+        // 别的番的分集挂到本番上，点播播到完全不相干的片源
+        guard let video = response.list.first(where: { $0.vodID == showID }) else {
             return []
         }
         let groups = Self.parsePlayGroups(playURL: video.playURL, playFrom: video.playFrom)
         guard let preferredIndex = Self.preferredGroupIndex(groups: groups) else { return [] }
         let preferred = groups[preferredIndex]
 
-        return preferred.episodes.enumerated().map { index, pair in
+        var usedNumbers = Set<Int>()
+        var results: [OnlineEpisode] = []
+        for (index, pair) in preferred.episodes.enumerated() {
             // 线路 = 各播放源组在同一序位的地址（首选组在最前，去重保序）；
             // 播放失败自动换源与手动切换线路都吃这个数组
             var routes: [String] = [pair.url]
@@ -194,16 +198,26 @@ public final class MacCMSProvider: SourceProvider, @unchecked Sendable {
                     routes.append(group.episodes[index].url)
                 }
             }
-            return OnlineEpisode(
+            // "第01集/EP01/01" 等动漫圈命名走 MediaMatching；解析不出（OVA/PV/特别篇）
+            // 按顺序兜底但跳过已占用的号——否则 "第01集#OVA#第02集" 得出 [1,2,2]，
+            // resumeKey/缓存目录/续播/已看全部串集
+            var number = MediaMatching.episodeNumber(from: pair.name)
+            if number == nil || usedNumbers.contains(number!) {
+                var candidate = index + 1
+                while usedNumbers.contains(candidate) { candidate += 1 }
+                number = candidate
+            }
+            usedNumbers.insert(number!)
+            results.append(OnlineEpisode(
                 providerID: providerID,
                 showID: showID,
-                // "第01集/EP01/01" 等动漫圈命名走 MediaMatching；解析不出按出现顺序兜底
-                number: MediaMatching.episodeNumber(from: pair.name) ?? index + 1,
+                number: number!,
                 title: pair.name.isEmpty ? nil : pair.name,
                 streamHint: pair.url,
                 routes: routes.count > 1 ? routes : nil
-            )
+            ))
         }
+        return results
     }
 
     /// `播放源A$$$播放源B`，组内 `第01集$url#第02集$url`；返回全部组（组名来自 playFrom）

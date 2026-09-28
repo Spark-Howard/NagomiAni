@@ -45,7 +45,9 @@ public enum DanmakuError: LocalizedError, Equatable {
 
 /// 弹弹play v2 API 客户端（签名请求 + 剧集匹配 + 弹幕拉取）。
 ///
-/// 签名协议：`X-Signature = BASE64(HMAC-SHA256(AppSecret, AppId + Timestamp + Method + Path))`。
+/// 签名协议（弹弹play 开放平台官方规范）：
+/// `X-Signature = BASE64(SHA256(AppId + Timestamp + Path + AppSecret))`
+/// —— 普通 SHA256（非 HMAC），AppSecret 拼在串尾，不含 HTTP Method。
 /// 仓库不内置任何凭据，凭据由用户在设置中填入。
 public final class DandanplayClient: @unchecked Sendable {
     private let credentials: DanmakuCredentials
@@ -58,7 +60,8 @@ public final class DandanplayClient: @unchecked Sendable {
                 baseURL: String = "https://api.dandanplay.net") {
         self.credentials = credentials
         self.session = session
-        self.baseURL = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        let trimmed = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/ \n\r\t"))
+        self.baseURL = trimmed.isEmpty ? "https://api.dandanplay.net" : trimmed
     }
 
     // MARK: - API
@@ -112,7 +115,7 @@ public final class DandanplayClient: @unchecked Sendable {
         request.setValue(timestamp, forHTTPHeaderField: "X-Timestamp")
         request.setValue(
             Self.signature(appId: credentials.appId, appSecret: credentials.appSecret,
-                           timestamp: timestamp, method: method, path: path),
+                           timestamp: timestamp, path: path),
             forHTTPHeaderField: "X-Signature"
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -131,14 +134,12 @@ public final class DandanplayClient: @unchecked Sendable {
         return data
     }
 
-    /// X-Signature = BASE64(HMAC-SHA256(AppSecret, AppId + Timestamp + Method + Path))
+    /// X-Signature = BASE64(SHA256(AppId + Timestamp + Path + AppSecret))（官方规范）
     public static func signature(
-        appId: String, appSecret: String, timestamp: String, method: String, path: String
+        appId: String, appSecret: String, timestamp: String, path: String
     ) -> String {
-        let data = Data("\(appId)\(timestamp)\(method)\(path)".utf8)
-        let key = Data(appSecret.utf8)
-        let hmac = HMAC<SHA256>.authenticationCode(for: data, using: SymmetricKey(data: key))
-        return Data(hmac).base64EncodedString()
+        let digest = SHA256.hash(data: Data("\(appId)\(timestamp)\(path)\(appSecret)".utf8))
+        return Data(digest).base64EncodedString()
     }
 
     // MARK: - 解析（静态纯函数，可单测）

@@ -12,7 +12,7 @@ struct MediaOverride: Equatable {
 }
 
 /// 自动连播解析"下一集"所需的当前播放上下文
-struct AutoNextContext {
+struct AutoNextContext: Equatable {
     let url: URL
     let seriesKey: String
     let episodeNumber: Int
@@ -194,6 +194,9 @@ final class PlayerModel: ObservableObject {
                 ? .online(showTitle: showTitle ?? displayTitle ?? "", episodeNumber: mediaOverride?.episodeNumber ?? 0)
                 : .local(url: url)
         )
+        // 弹幕在 load 一开始就切换：换集/加载失败时旧弹幕立即清掉，
+        // 不会把上一集的弹幕残留在加载中的画面上（同集重载由同集 guard 保留）
+        danmaku.prepare(danmakuContext)
         let resumeAt = resumeStore.entry(forPath: resumePath)
             .flatMap { ResumePolicy.resumePosition(position: $0.position, duration: $0.duration) }
         pendingResume = (path: resumePath, position: resumeAt ?? 0, duration: 0)
@@ -255,8 +258,6 @@ final class PlayerModel: ObservableObject {
             if let resumeAt {
                 syncMessage = "已从 \(Self.format(resumeAt)) 继续播放"
             }
-            // 弹幕：换集自动拉取（控制器内部判断开关/凭据/同集去重，失败静默）
-            danmaku.prepare(danmakuContext)
         } catch {
             // 引擎已通过 delegate 上报 failed 状态
         }
@@ -318,6 +319,8 @@ final class PlayerModel: ObservableObject {
     }
 
     private func autoSyncOnFinish() {
+        // seek/拖动后短时间内到达 EOF（拖到结尾看一眼）不算自然看完，防误标
+        if let lastSeek = lastSeekTime, Date().timeIntervalSince(lastSeek) < seekIgnoreWindow { return }
         guard let media = currentMedia,
               let episode = media.episodeNumber,
               bindingID(for: media.seriesKey) != nil else {
@@ -348,8 +351,8 @@ final class PlayerModel: ObservableObject {
                     return
                 }
                 guard let subjectID else { return }
-                let eps = try await client.episodes(subjectID: subjectID, type: 0, limit: 300)
-                guard let ep = eps.data.first(where: { Int(($0.sort ?? 0).rounded()) == episode }) else {
+                let eps = try await client.allEpisodes(subjectID: subjectID)
+                guard let ep = eps.first(where: { Int(($0.sort ?? 0).rounded()) == episode }) else {
                     // 永久性失败（条目里没有该集）：不入队，避免无限重试
                     syncMessage = "在 Bangumi 上未找到第 \(episode) 集，跳过同步"
                     return
@@ -359,14 +362,37 @@ final class PlayerModel: ObservableObject {
                 // 同步成功顺带冲刷积压的离线记录
                 await flushPendingWatchedMarks(client: client)
             } catch {
-                // 网络/服务端错误：入队待同步，联网后自动补
+                // 网络/服务端临时错误：入队待同步，联网后自动补；
+                // 永久性失败（条目不存在 404/响应异常）重试也无意义，不入队——
+                // 否则死重试会挤占队列容量，把真正待同步的记录淘汰掉
                 if let subjectID {
-                    enqueuePendingWatched(subjectID: subjectID, episodeNumber: episode)
-                    syncMessage = "同步失败（已记录待重试，共 \(Self.loadPendingWatchedMarks().count) 条）：\(Self.describe(error))"
+                    if Self.isRetryableSyncError(error) {
+                        enqueuePendingWatched(subjectID: subjectID, episodeNumber: episode)
+                        syncMessage = "同步失败（已记录待重试，共 \(Self.loadPendingWatchedMarks().count) 条）：\(Self.describe(error))"
+                    } else {
+                        syncMessage = "同步失败（不再重试）：\(Self.describe(error))"
+                    }
                 } else {
                     syncMessage = "同步失败：\(Self.describe(error))"
                 }
             }
+        }
+    }
+
+    /// 该错误是否值得入队重试：网络/限频/服务端故障可重试；404（条目不存在）、
+    /// 4xx 权限类、响应解析失败都是永久性的
+    static func isRetryableSyncError(_ error: Error) -> Bool {
+        switch error {
+        case BangumiError.network:
+            return true
+        case BangumiError.unauthorized:
+            return true // 令牌刷新后可恢复
+        case BangumiError.httpStatus(let code, _):
+            return code == 429 || code >= 500
+        case is URLError:
+            return true
+        default:
+            return false
         }
     }
 
@@ -415,10 +441,10 @@ final class PlayerModel: ObservableObject {
         var syncedCount = 0
         for (subjectID, marks) in Dictionary(grouping: pending, by: \.subjectID) {
             do {
-                let eps = try await client.episodes(subjectID: subjectID, type: 0, limit: 300)
+                let eps = try await client.allEpisodes(subjectID: subjectID)
                 var episodeIDs: [Int] = []
                 for mark in marks {
-                    if let ep = eps.data.first(where: { Int(($0.sort ?? 0).rounded()) == mark.episodeNumber }) {
+                    if let ep = eps.first(where: { Int(($0.sort ?? 0).rounded()) == mark.episodeNumber }) {
                         episodeIDs.append(ep.id)
                     }
                     // else：条目里没有该集（永久性失败）——丢弃
@@ -430,10 +456,20 @@ final class PlayerModel: ObservableObject {
                 // 尊重 bgm.tv 频率限制
                 try? await Task.sleep(nanoseconds: 300_000_000)
             } catch {
-                remaining.append(contentsOf: marks) // 网络/权限仍失败：留在队列下次再试
+                // 网络/权限仍失败：留在队列下次再试；永久性失败（404 等）丢弃，
+                // 不再无限重试挤占容量
+                if Self.isRetryableSyncError(error) {
+                    remaining.append(contentsOf: marks)
+                }
             }
         }
-        Self.savePendingWatchedMarks(remaining)
+        // 冲刷期间可能又有新的记录入队（快照已过期）：合并写回，否则会把新记录覆盖丢失
+        let fresh = Self.loadPendingWatchedMarks()
+        var merged = remaining
+        for mark in fresh where !merged.contains(where: { $0.subjectID == mark.subjectID && $0.episodeNumber == mark.episodeNumber }) {
+            merged.append(mark)
+        }
+        Self.savePendingWatchedMarks(merged)
         if syncedCount > 0 {
             syncMessage = "已补同步 \(syncedCount) 条离线观看记录 ✓"
         }
@@ -799,7 +835,12 @@ extension PlayerModel: @preconcurrency PlaybackEngineDelegate {
         guard let context = autoNextContext, let resolver = nextEpisodeResolver else { return }
         isResolvingNextOffer = true
         defer { isResolvingNextOffer = false }
-        guard let next = await resolver(context) else { return }
+        // 在线源解析要发网络请求（可能数秒），返回后必须复核：期间用户可能已
+        // 换集（autoNextContext 变化）或点了 ×，陈旧结果会把别的剧的下一集盖上来
+        let next = await resolver(context)
+        guard !Task.isCancelled, autoPlayNextEnabled, !nextOfferDismissed, nextEpisodeOffer == nil,
+              autoNextContext == context else { return }
+        guard let next else { return }
         nextEpisodeOffer = NextEpisodeOffer(playback: next)
     }
 

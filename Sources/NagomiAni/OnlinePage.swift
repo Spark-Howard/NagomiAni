@@ -321,8 +321,11 @@ struct OnlinePage: View {
                 }
             }
             .task {
-                await store.ensureEpisodes(for: show)
-                await store.refreshEpisodes(for: show) // 打开详情 = 检查更新（拉取式）
+                // 刚从网络拉过分集（缓存 miss）就不再强刷——否则首开详情 = 两个相同请求背靠背
+                let hadCached = await store.ensureEpisodes(for: show)
+                if hadCached {
+                    await store.refreshEpisodes(for: show) // 打开详情 = 检查更新（拉取式）
+                }
                 store.markEpisodesSeen(show)
                 await store.refreshWatched(for: show)
             }

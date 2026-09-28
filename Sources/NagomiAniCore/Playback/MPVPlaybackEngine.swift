@@ -23,8 +23,14 @@ public final class MPVPlaybackEngine: PlaybackEngine {
     private var cachedDuration: Double = 0
     private var cachedTime: Double = 0
     private var pendingAutoplay = true
+    /// 加载期用户/系统要求暂停：FILE_LOADED 到达后保持暂停（不自动播放）
+    private var pauseAfterLoad = false
     private let loadLock = NSLock()
     private var loadContinuation: CheckedContinuation<Void, Error>?
+    /// 加载代次：超时定时器只对发起它的那次 load 生效（否则线路 fallback /
+    /// 快速换集时，上一次 load 的陈旧定时器会误杀正在进行的加载）
+    private var loadGeneration = 0
+    private var loadTimeoutWork: DispatchWorkItem?
     private var trackList: [MediaTrack] = []
     private var loadedURL: URL?
     /// 最近选中的字幕轨道 id（关闭字幕后再开启时恢复）
@@ -90,6 +96,7 @@ public final class MPVPlaybackEngine: PlaybackEngine {
 
         loadedURL = url
         pendingAutoplay = options.autoplay
+        pauseAfterLoad = false
         cachedTime = 0
         cachedDuration = 0
         eofFlag = false
@@ -100,15 +107,31 @@ public final class MPVPlaybackEngine: PlaybackEngine {
 
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             loadLock.lock()
+            // 重入保护：上一次 load 的续接还挂着时先以失败收场
+            // （直接覆盖会令前一个 await engine.load 永久悬挂，其 Task 泄漏）
+            if let previous = loadContinuation {
+                loadContinuation = nil
+                loadLock.unlock()
+                previous.resume(throwing: PlaybackError.unknown)
+                loadLock.lock()
+            }
+            loadGeneration += 1
+            let generation = loadGeneration
             loadContinuation = cont
             loadLock.unlock()
-            // 超时兜底：FILE_LOADED 迟迟不来时不再无限转圈
-            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+            loadTimeoutWork?.cancel()
+            // 超时兜底：FILE_LOADED 迟迟不来时不再无限转圈；只对本代次 load 生效，
+            // 且超时必须上报 failed 状态，否则全部线路超时后 UI 永远停在"加载中"
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.loadGeneration == generation else { return }
                 #if DEBUG
                 print("[mpv-engine] load TIMEOUT waiting FILE_LOADED")
                 #endif
-                self?.resolveLoad(.failure(PlaybackError.unknown))
+                self.setState(.failed("加载超时"))
+                self.resolveLoad(.failure(PlaybackError.unknown))
             }
+            loadTimeoutWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
             // loadfile 在后台线程执行：mpv_command 会阻塞到命令完成，
             // 若在主线程调用，切页/加载大文件时 UI 会卡死（转圈定格）
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -145,11 +168,19 @@ public final class MPVPlaybackEngine: PlaybackEngine {
 
     public func play() {
         guard let handle = mpvHandle else { return }
+        pauseAfterLoad = false
         if state == .finished || eofFlag {
-            // 播完重播：回到开头并强制切到播放态（eof-reached 属性可能有延迟）
+            // 播完重播：keep-open=no 下 EOF 后 mpv 已进 idle、文件被卸载，
+            // seek 无法生效——重新载入（事件驱动后续状态：START_FILE→loading→FILE_LOADED→play）
             eofFlag = false
-            seek(to: 0, completion: nil)
             pausedFlag = false
+            if let url = loadedURL {
+                pendingAutoplay = true
+                let target = url.isFileURL ? url.path : url.absoluteString
+                runCommand(["loadfile", target, "replace"])
+                return
+            }
+            seek(to: 0, completion: nil)
             setState(.playing)
         }
         pausedFlag = false
@@ -165,6 +196,11 @@ public final class MPVPlaybackEngine: PlaybackEngine {
     public func pause() {
         guard let handle = mpvHandle else { return }
         pausedFlag = true
+        if state == .loading {
+            // 加载期的暂停意图：FILE_LOADED 到达后保持暂停
+            // （否则加载完成的 autoplay 会覆盖它——切走模块后音频在后台自动出声）
+            pauseAfterLoad = true
+        }
         var flag: Int32 = 1
         mpv_set_property(handle, "pause", MPV_FORMAT_FLAG, &flag)
     }
@@ -330,7 +366,19 @@ public final class MPVPlaybackEngine: PlaybackEngine {
             resolveLoad(.success(()))
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if !self.isFailed { self.state = .ready }
+                // 超时兜底已把本次加载判为失败时，迟到的加载成功不再接管状态
+                // （否则 UI 显示失败、音频却自动播出来）
+                guard !self.isFailed else { return }
+                if self.pauseAfterLoad {
+                    // 加载期被要求暂停：载入完成后保持暂停
+                    self.state = .paused
+                    var flag: Int32 = 1
+                    if let handle = self.mpvHandle {
+                        mpv_set_property(handle, "pause", MPV_FORMAT_FLAG, &flag)
+                    }
+                    return
+                }
+                self.state = .ready
                 if self.pendingAutoplay { self.play() }
             }
 
@@ -447,6 +495,8 @@ public final class MPVPlaybackEngine: PlaybackEngine {
         let cont = loadContinuation
         loadContinuation = nil
         loadLock.unlock()
+        guard cont != nil else { return }
+        loadTimeoutWork?.cancel() // 加载已定局，撤销超时兜底
         cont?.resume(with: result)
     }
 

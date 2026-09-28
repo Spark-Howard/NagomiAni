@@ -77,6 +77,17 @@ private extension KeyedDecodingContainer {
         }
         return nil
     }
+
+    /// 整数容错：可能是 Int / String / Double，解析失败返回 nil
+    func decodeLenientInt(forKey key: Key) -> Int? {
+        decodeLenientInt64(forKey: key).map(Int.init)
+    }
+
+    /// 字段容错（防御式解码约定）：字段存在但类型异常时降级 nil，
+    /// 绝不让单个坏字段毁掉整个响应
+    func decodeLenient<T: Decodable>(_ type: T.Type = T.self, forKey key: Key) -> T? {
+        (try? decodeIfPresent(T.self, forKey: key)) ?? nil
+    }
 }
 
 // MARK: - 模型
@@ -100,6 +111,26 @@ public struct BangumiUser: Codable, Sendable {
         case id, username, nickname, sign, avatar
         case userGroup = "user_group"
     }
+
+    public init(id: Int, username: String, nickname: String, sign: String?,
+                userGroup: Int?, avatar: BangumiAvatar?) {
+        self.id = id
+        self.username = username
+        self.nickname = nickname
+        self.sign = sign
+        self.userGroup = userGroup
+        self.avatar = avatar
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = c.decodeLenientInt(forKey: .id) ?? 0
+        username = (try? c.decode(String.self, forKey: .username)) ?? ""
+        nickname = (try? c.decode(String.self, forKey: .nickname)) ?? ""
+        sign = c.decodeLenient(forKey: .sign)
+        userGroup = c.decodeLenientInt(forKey: .userGroup)
+        avatar = c.decodeLenient(forKey: .avatar)
+    }
 }
 
 /// 放送日历（GET /calendar）里一天的条目组：
@@ -113,11 +144,36 @@ public struct CalendarDay: Codable, Sendable {
         public let en: String?
         public let cn: String?
         public let ja: String?
+
+        enum CodingKeys: String, CodingKey { case id, en, cn, ja }
+
+        public init(id: Int?, en: String?, cn: String?, ja: String?) {
+            self.id = id
+            self.en = en
+            self.cn = cn
+            self.ja = ja
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = c.decodeLenientInt(forKey: .id)
+            en = c.decodeLenient(forKey: .en)
+            cn = c.decodeLenient(forKey: .cn)
+            ja = c.decodeLenient(forKey: .ja)
+        }
     }
+
+    enum CodingKeys: String, CodingKey { case weekday, items }
 
     public init(weekday: Weekday?, items: [Subject]?) {
         self.weekday = weekday
         self.items = items
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        weekday = c.decodeLenient(forKey: .weekday)
+        items = c.decodeLenient(forKey: .items)
     }
 }
 
@@ -498,17 +554,18 @@ public struct UserSubjectCollection: Codable, Sendable, Identifiable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        subjectID = try c.decode(Int.self, forKey: .subjectID)
-        subjectType = try c.decodeIfPresent(SubjectType.self, forKey: .subjectType)
-        rate = try c.decodeIfPresent(Int.self, forKey: .rate)
-        type = try c.decodeIfPresent(SubjectCollectionType.self, forKey: .type)
-        comment = try c.decodeIfPresent(String.self, forKey: .comment)
-        tags = try c.decodeIfPresent([String].self, forKey: .tags)
-        epStatus = try c.decodeIfPresent(Int.self, forKey: .epStatus)
-        volStatus = try c.decodeIfPresent(Int.self, forKey: .volStatus)
+        // 全字段宽松：单个字段类型异常只降级该条目（id→0），不毁掉整页收藏列表
+        subjectID = c.decodeLenientInt(forKey: .subjectID) ?? 0
+        subjectType = c.decodeLenient(forKey: .subjectType)
+        rate = c.decodeLenientInt(forKey: .rate)
+        type = c.decodeLenient(forKey: .type)
+        comment = c.decodeLenient(forKey: .comment)
+        tags = c.decodeLenient(forKey: .tags)
+        epStatus = c.decodeLenientInt(forKey: .epStatus)
+        volStatus = c.decodeLenientInt(forKey: .volStatus)
         updatedAt = c.decodeLenientInt64(forKey: .updatedAt)
-        isPrivate = try c.decodeIfPresent(Bool.self, forKey: .isPrivate)
-        subject = try c.decodeIfPresent(Subject.self, forKey: .subject)
+        isPrivate = c.decodeLenient(forKey: .isPrivate)
+        subject = c.decodeLenient(forKey: .subject)
     }
 }
 
@@ -531,8 +588,8 @@ public struct UserEpisodeCollection: Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        episode = try c.decodeIfPresent(Episode.self, forKey: .episode)
-        type = try c.decodeIfPresent(EpisodeCollectionType.self, forKey: .type)
+        episode = c.decodeLenient(forKey: .episode)
+        type = c.decodeLenient(forKey: .type)
         updatedAt = c.decodeLenientInt64(forKey: .updatedAt)
     }
 }
@@ -543,6 +600,24 @@ public struct Paged<T: Codable & Sendable>: Codable, Sendable {
     public let limit: Int?
     public let offset: Int?
     public let data: [T]
+
+    public init(total: Int?, limit: Int?, offset: Int?, data: [T]) {
+        self.total = total
+        self.limit = limit
+        self.offset = offset
+        self.data = data
+    }
+
+    enum CodingKeys: String, CodingKey { case total, limit, offset, data }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        total = c.decodeLenientInt(forKey: .total)
+        limit = c.decodeLenientInt(forKey: .limit)
+        offset = c.decodeLenientInt(forKey: .offset)
+        // data 保持强解：data 拿不到说明响应整体异常，应向上报错而不是静默空页
+        data = try c.decode([T].self, forKey: .data)
+    }
 }
 
 /// 修改收藏的请求体（POST /v0/users/-/collections/{subject_id}）

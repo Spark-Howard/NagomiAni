@@ -20,6 +20,30 @@ public struct HLSPlaylist: Sendable, Equatable {
     public let isVOD: Bool
     /// EXT-X-MAP 的 URI（fMP4 初始化段，media）
     public let initSegmentURI: String?
+    /// 含加密分片（EXT-X-KEY）：整体缓存会产出无法解密的坏副本
+    public let hasEncryptedSegments: Bool
+    /// 含 EXT-X-BYTERANGE（单文件 HLS）：按 URI 缓存会把整个文件重复下载 N 遍
+    public let hasByteRangeSegments: Bool
+
+    public init(
+        kind: Kind,
+        variants: [HLSVariant],
+        segments: [HLSSegment],
+        targetDuration: Double?,
+        isVOD: Bool,
+        initSegmentURI: String?,
+        hasEncryptedSegments: Bool = false,
+        hasByteRangeSegments: Bool = false
+    ) {
+        self.kind = kind
+        self.variants = variants
+        self.segments = segments
+        self.targetDuration = targetDuration
+        self.isVOD = isVOD
+        self.initSegmentURI = initSegmentURI
+        self.hasEncryptedSegments = hasEncryptedSegments
+        self.hasByteRangeSegments = hasByteRangeSegments
+    }
 }
 
 /// HLS 变体流（master playlist 的一项）
@@ -65,6 +89,8 @@ public enum HLSParser {
         var targetDuration: Double?
         var isVOD = false
         var initSegmentURI: String?
+        var hasEncryptedSegments = false
+        var hasByteRangeSegments = false
 
         var pendingVariantAttrs: String?
         var pendingDuration: Double?
@@ -88,6 +114,10 @@ public enum HLSParser {
                 } else if line.hasPrefix("#EXT-X-MAP:") {
                     // EXT-X-MAP 的 URI 是内联属性（fMP4 初始化段）；只传属性部分
                     initSegmentURI = Self.attribute(String(line.dropFirst("#EXT-X-MAP:".count)), name: "URI")
+                } else if line.hasPrefix("#EXT-X-KEY:") || line.hasPrefix("#EXT-X-SESSION-KEY:") {
+                    hasEncryptedSegments = true
+                } else if line.hasPrefix("#EXT-X-BYTERANGE:") {
+                    hasByteRangeSegments = true
                 }
                 continue
             }
@@ -110,12 +140,16 @@ public enum HLSParser {
 
         if !variants.isEmpty {
             return HLSPlaylist(kind: .master, variants: variants, segments: [],
-                               targetDuration: nil, isVOD: false, initSegmentURI: nil)
+                               targetDuration: nil, isVOD: false, initSegmentURI: nil,
+                               hasEncryptedSegments: hasEncryptedSegments,
+                               hasByteRangeSegments: hasByteRangeSegments)
         }
         if !segments.isEmpty || initSegmentURI != nil {
             return HLSPlaylist(kind: .media, variants: [], segments: segments,
                                targetDuration: targetDuration, isVOD: isVOD,
-                               initSegmentURI: initSegmentURI)
+                               initSegmentURI: initSegmentURI,
+                               hasEncryptedSegments: hasEncryptedSegments,
+                               hasByteRangeSegments: hasByteRangeSegments)
         }
         throw HLSError.emptyPlaylist
     }

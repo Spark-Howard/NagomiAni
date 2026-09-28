@@ -63,6 +63,10 @@ public final class LoopbackHTTPServer: @unchecked Sendable {
                         self.assignedPort = listener.port?.rawValue ?? 0
                         self.finishStart(.success(self.assignedPort))
                     case .failed(let error):
+                        // 清掉失败的 listener：否则下次 start 会因 listener 非 nil
+                        // 直接返回，等待中的 continuation 永远无人 resume（永久挂起）
+                        self.listener?.cancel()
+                        self.listener = nil
                         self.finishStart(.failure(error))
                     default:
                         break

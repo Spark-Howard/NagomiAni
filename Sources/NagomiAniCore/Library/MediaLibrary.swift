@@ -41,10 +41,25 @@ public struct Series: Codable, Sendable, Identifiable, Equatable {
 public struct LibraryStore: Codable, Sendable {
     public var folders: [String]
     public var series: [Series]
+    /// 用户主动移除的番（磁盘文件仍在）：扫描时跳过这些 seriesKey，
+    /// 否则下次全量/局部扫描会把刚移除的番重新扫回库
+    public var ignoredSeriesKeys: Set<String>
 
-    public init(folders: [String], series: [Series]) {
+    public init(folders: [String], series: [Series], ignoredSeriesKeys: Set<String> = []) {
         self.folders = folders
         self.series = series
+        self.ignoredSeriesKeys = ignoredSeriesKeys
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case folders, series, ignoredSeriesKeys
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        folders = try c.decode([String].self, forKey: .folders)
+        series = try c.decode([Series].self, forKey: .series)
+        ignoredSeriesKeys = (try? c.decode(Set<String>.self, forKey: .ignoredSeriesKeys)) ?? []
     }
 }
 
@@ -70,6 +85,12 @@ public final class MediaLibrary: @unchecked Sendable {
            let decoded = try? JSONDecoder().decode(LibraryStore.self, from: data) {
             self.store = decoded
         } else {
+            // 解码失败（损坏/未来 schema 不兼容）：先把原文件改名留存备查，
+            // 再回退空库——否则一次失败 = 目录登记与全部关联无提示清零，无法回滚
+            if let data = try? Data(contentsOf: storeURL) {
+                let backup = storeURL.deletingPathExtension().path + ".corrupt.json"
+                try? data.write(to: URL(fileURLWithPath: backup))
+            }
             self.store = LibraryStore(folders: [], series: [])
         }
     }
@@ -118,6 +139,11 @@ public final class MediaLibrary: @unchecked Sendable {
             let standard = Self.canonicalPath(path)
             guard !store.folders.contains(standard) else { return false }
             store.folders.append(standard)
+            // 重新登记目录 = 用户明确要求扫描它：解除该目录子树的移除忽略，
+            // 否则之前移除过的番会永远加不回来
+            store.ignoredSeriesKeys = store.ignoredSeriesKeys.filter {
+                !($0 == standard || $0.hasPrefix(standard + "/"))
+            }
             save()
             return true
         }
@@ -139,7 +165,9 @@ public final class MediaLibrary: @unchecked Sendable {
 
     // MARK: - 扫描
 
-    /// 全量重扫：以磁盘为准重建文件索引，同时保留旧的 Bangumi 关联（按 seriesKey）
+    /// 全量重扫：以磁盘为准重建文件索引，同时保留旧的 Bangumi 关联（按 seriesKey）。
+    /// 已关联但文件全空的系列保留（与 rescanFolder 同语义——用户"先不管"之后
+    /// 还有机会通过"更新"恢复关联，不该被静默清掉）。
     public func rescan() {
         // 磁盘扫描耗时长，放在锁外；只对「合并 + 落盘」持锁
         let folders = self.folders
@@ -155,16 +183,29 @@ public final class MediaLibrary: @unchecked Sendable {
         }
 
         withLock {
-            // 合并旧关联信息
+            // 合并前重读目录登记：扫描期间（大库可达数秒）用户可能已移除某目录，
+            // 把快照扫出的结果原样合并回去会让刚删的目录"复活"
+            let currentFolders = Set(store.folders)
+            let keptKeys = Set(found.keys.filter { key in
+                currentFolders.contains(key) || currentFolders.contains { key.hasPrefix($0 + "/") }
+            })
+            // 合并旧关联信息；用户主动移除过的番（文件仍在磁盘）不再扫回库
+            let ignored = store.ignoredSeriesKeys
             let oldByKey = Dictionary(uniqueKeysWithValues: store.series.map { ($0.seriesKey, $0) })
             var merged: [Series] = []
-            for key in found.keys.sorted() {
-                guard var series = found[key] else { continue }
+            for key in keptKeys.sorted() {
+                guard var series = found[key], !ignored.contains(key) else { continue }
                 if let old = oldByKey[key] {
                     series.subjectID = old.subjectID
                     series.matchState = old.matchState
                 }
                 merged.append(series)
+            }
+            // 已关联但磁盘上文件全空的系列并回（不在 found 里，上面循环覆盖不到）
+            for old in store.series where old.files.isEmpty && old.subjectID != nil {
+                if !merged.contains(where: { $0.seriesKey == old.seriesKey }) {
+                    merged.append(old)
+                }
             }
             store.series = merged
             save()
@@ -218,9 +259,10 @@ public final class MediaLibrary: @unchecked Sendable {
                     merged.append(series)
                 }
             }
-            // 该目录下新增的系列（此前不在库中）
+            // 该目录下新增的系列（此前不在库中）；用户主动移除过的不再扫回
+            let ignored = store.ignoredSeriesKeys
             for key in found.keys.sorted() {
-                guard let series = found[key], !series.files.isEmpty else { continue }
+                guard let series = found[key], !series.files.isEmpty, !ignored.contains(key) else { continue }
                 merged.append(series)
             }
 
@@ -241,14 +283,20 @@ public final class MediaLibrary: @unchecked Sendable {
         }
     }
 
-    /// 移除一部番的条目（文件已删除场景）。
+    /// 移除一部番的条目。
+    /// - Parameter ignoreFutureScans: 磁盘文件仍在的"主动移除"传 true（登记忽略，
+    ///   否则下次扫描会把该番重新扫回库）；文件已删除的场景保持 false，
+    ///   用户日后把文件放回同一路径时能正常重新入库。
     /// 若该番的目录本身是已登记的库目录（此时应已没有视频），把目录登记一并移除，
     /// 避免留下再也扫不到的空目录。
-    public func removeSeries(_ seriesKey: String) {
+    public func removeSeries(_ seriesKey: String, ignoreFutureScans: Bool = false) {
         withLock {
             store.series.removeAll { $0.seriesKey == seriesKey }
             if store.folders.contains(seriesKey) {
                 store.folders.removeAll { $0 == seriesKey }
+            }
+            if ignoreFutureScans {
+                store.ignoredSeriesKeys.insert(seriesKey)
             }
             save()
         }

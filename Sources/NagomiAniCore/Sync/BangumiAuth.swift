@@ -367,11 +367,46 @@ public final class BangumiAuth: @unchecked Sendable {
 
 /// 串行化进程内 token 刷新：refresh_token 会被服务端轮换，多个实例并发刷新时
 /// 只有一个真正发起网络请求，其它实例等待后直接采用文件里已更新的令牌。
+/// 注意 actor 方法在 await 处可重入——仅靠把 body 放进 actor 并不能互斥，
+/// 需要显式信号量保证前一个 body 完全结束后才放行下一个。
 private actor AuthRefreshGate {
     static let shared = AuthRefreshGate()
+    private let semaphore = AsyncSemaphore(value: 1)
 
     func run<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
-        try await body()
+        await semaphore.wait()
+        do {
+            let result = try await body()
+            await semaphore.signal()
+            return result
+        } catch {
+            await semaphore.signal()
+            throw error
+        }
+    }
+}
+
+/// 最小异步信号量（actor 实现；挂起点不阻塞线程）
+private actor AsyncSemaphore {
+    private var value: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(value: Int) { self.value = value }
+
+    func wait() async {
+        if value > 0 {
+            value -= 1
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func signal() {
+        value += 1
+        if value > 0, !waiters.isEmpty {
+            value -= 1
+            waiters.removeFirst().resume()
+        }
     }
 }
 

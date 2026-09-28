@@ -5,25 +5,26 @@ import XCTest
 final class DandanplayClientTests: XCTestCase {
     // MARK: - 签名
 
-    /// X-Signature = BASE64(HMAC-SHA256(AppSecret, AppId + Timestamp + Method + Path))
+    /// X-Signature = BASE64(SHA256(AppId + Timestamp + Path + AppSecret))（官方规范，
+    /// 普通 SHA256、AppSecret 拼串尾、不含 Method）
     /// 期望值由独立脚本计算（非被测代码自身）
     func testSignatureVector() {
         let signature = DandanplayClient.signature(
             appId: "testappid", appSecret: "testsecret",
-            timestamp: "1700000000", method: "GET", path: "/api/v2/match"
+            timestamp: "1700000000", path: "/api/v2/match"
         )
-        XCTAssertEqual(signature, "O4q1yCRTv0cb9RrVRMpahzYbOazsU3Cnl4rBeOIRcC8=")
+        XCTAssertEqual(signature, "X3Mne2iip4P9+8NN45V+j8ajFxdIRbTieA4NXEirk8o=")
     }
 
     func testSignatureChangesWithInputs() {
         let base = DandanplayClient.signature(appId: "a", appSecret: "s",
-                                              timestamp: "1", method: "GET", path: "/p")
+                                              timestamp: "1", path: "/p")
         XCTAssertNotEqual(base, DandanplayClient.signature(appId: "b", appSecret: "s",
-                                                           timestamp: "1", method: "GET", path: "/p"))
+                                                           timestamp: "1", path: "/p"))
         XCTAssertNotEqual(base, DandanplayClient.signature(appId: "a", appSecret: "s",
-                                                           timestamp: "2", method: "GET", path: "/p"))
+                                                           timestamp: "2", path: "/p"))
         XCTAssertNotEqual(base, DandanplayClient.signature(appId: "a", appSecret: "s",
-                                                           timestamp: "1", method: "POST", path: "/p"))
+                                                           timestamp: "1", path: "/q"))
     }
 
     func testCredentialsConfiguration() {

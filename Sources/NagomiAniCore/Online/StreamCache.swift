@@ -48,12 +48,14 @@ public final class StreamCache: @unchecked Sendable {
     public enum CacheError: LocalizedError {
         case liveStreamNotCacheable
         case unsupportedPlaylist
+        case encryptedStreamNotCacheable
         case httpStatus(Int)
 
         public var errorDescription: String? {
             switch self {
             case .liveStreamNotCacheable: return "直播流不支持整体缓存"
             case .unsupportedPlaylist: return "播放列表无法解析为可缓存的媒体流"
+            case .encryptedStreamNotCacheable: return "加密流不支持缓存"
             case .httpStatus(let code): return "下载失败（HTTP \(code)）"
             }
         }
@@ -77,6 +79,11 @@ public final class StreamCache: @unchecked Sendable {
         self.byteLimit = byteLimit
         self.session = session
         try? FileManager.default.createDirectory(at: rootDirectory, withIntermediateDirectories: true)
+        // 启动时清理上次运行遗留的孤儿目录（取消/失败产生的无标记目录）：
+        // 此刻无活跃下载，凡无 complete.json 的目录都是孤儿
+        for dir in allCacheDirectories() where readMarker(at: dir) == nil {
+            try? FileManager.default.removeItem(at: dir)
+        }
     }
 
     // MARK: - 状态查询
@@ -140,6 +147,10 @@ public final class StreamCache: @unchecked Sendable {
             mediaURL = playlistURL
         }
         guard media.isVOD else { throw CacheError.liveStreamNotCacheable }
+        // 加密流：缓存的是密文分片，重写的本地 playlist 又不带 KEY 行，副本必然无法解密；
+        // BYTERANGE：所有分片 URI 相同靠范围切分，按 URI 缓存会把整个文件重复下载 N 遍
+        guard !media.hasEncryptedSegments else { throw CacheError.encryptedStreamNotCacheable }
+        guard !media.hasByteRangeSegments else { throw CacheError.unsupportedPlaylist }
 
         // fMP4 初始化段
         var initLocalName: String?
@@ -264,12 +275,18 @@ public final class StreamCache: @unchecked Sendable {
 
     // MARK: - 私有：下载辅助
 
-    /// 登记活跃下载并准备全新目录（重复下载覆盖重来）
+    /// 登记活跃下载并准备目录。已有分片**保留**（中断续传：分片已存在即跳过才有意义），
+    /// 仅清旧的完成标记与本地 playlist（下载完成后会重新生成）；
+    /// 渐进式文件在写入前由 createFile 截断重建，同样安全。
     private func beginDownload(cacheKey: String) async throws -> URL {
         lock.withLock { _ = activeKeys.insert(cacheKey) }
         let dir = directory(for: cacheKey)
-        try? FileManager.default.removeItem(at: dir)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("complete.json"))
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("index.m3u8"))
+        } else {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
         return dir
     }
 
@@ -403,19 +420,27 @@ public final class StreamCache: @unchecked Sendable {
         }
     }
 
-    /// LRU 淘汰：超限后按目录 mtime 从旧到新删（跳过活跃下载），直到回到限内
+    /// LRU 淘汰：超限后按目录 mtime 从旧到新删（跳过活跃下载），直到回到限内。
+    /// 无完成标记的目录（取消/失败遗留的孤儿）也参与淘汰——它们只占预算却永不会
+    /// 被 cachedKeys 认出，若不清理会挤光全部正常缓存。
     private func evictIfNeeded() {
         lock.lock()
         defer { lock.unlock() }
         var total = totalBytesLocked()
         guard total > byteLimit else { return }
+        let activeDirs = Set(activeKeys.map { directory(for: $0).standardizedFileURL.path })
         let dirs = allCacheDirectories().sorted { lhs, rhs in
             let l = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             let r = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             return l < r
         }
         for dir in dirs {
-            guard let marker = readMarker(at: dir), !activeKeys.contains(marker.key) else { continue }
+            let isActive = activeDirs.contains(dir.standardizedFileURL.path)
+            if let marker = readMarker(at: dir) {
+                if activeKeys.contains(marker.key) { continue }
+            } else if isActive {
+                continue // 活跃下载尚未写完成标记
+            }
             let size = directorySize(dir)
             try? FileManager.default.removeItem(at: dir)
             total -= size

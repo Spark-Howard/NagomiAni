@@ -183,7 +183,12 @@ struct DanmakuSettingsSheet: View {
                 Button("保存") {
                     UserDefaults.standard.set(appId, forKey: DanmakuController.appIdKey)
                     UserDefaults.standard.set(appSecret, forKey: DanmakuController.appSecretKey)
-                    UserDefaults.standard.set(baseURL, forKey: DanmakuController.baseURLKey)
+                    // 服务器地址清空时回写默认官方地址（空串会让所有请求静默失败）
+                    let trimmedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    UserDefaults.standard.set(
+                        trimmedURL.isEmpty ? "https://api.dandanplay.net" : trimmedURL,
+                        forKey: DanmakuController.baseURLKey
+                    )
                     controller.refreshConfiguration()
                     dismiss()
                 }

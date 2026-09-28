@@ -91,6 +91,9 @@ final class AccountViewModel: ObservableObject {
         user = nil
         collections = []
         isLoggedIn = false
+        // 丢弃在途请求：不取消的话结果回来后会把旧账号数据写回刚清空的缓存
+        for (_, task) in inFlight { task.cancel() }
+        inFlight.removeAll()
         clearCache()
     }
 
@@ -183,6 +186,10 @@ final class AccountViewModel: ObservableObject {
         do {
             let list = try await fetchCollections(username: user.username, type: type)
 
+            // 请求期间登出/换账号：结果作废（否则旧账号数据会写回已清空的缓存，
+            // 换号登录后还会被当作缓存"秒开"）。user 是请求开始时的快照。
+            guard isLoggedIn, let currentUser = self.user, currentUser.username == user.username else { return }
+
             // 列表已拿到：先用条目缓存补全详情，立刻出内容，再后台补缺的
             let merged = cache.enrich(list)
             let hasCache = cache.page(for: type) != nil
@@ -213,7 +220,8 @@ final class AccountViewModel: ObservableObject {
 
     // MARK: - 私有
 
-    /// 请求列表，同类型并发去重
+    /// 请求列表，同类型并发去重；按 offset 翻页拉全量
+    ///（只拉第一页 100 条的话，收藏超过 100 的用户第 101 条起永远看不到）
     private func fetchCollections(
         username: String,
         type: SubjectCollectionType
@@ -225,8 +233,22 @@ final class AccountViewModel: ObservableObject {
 
         let clientRef = client
         let task = Task<[UserSubjectCollection], Error> {
-            let page = try await clientRef.collections(username: username, type: type, limit: 100)
-            return page.data
+            var all: [UserSubjectCollection] = []
+            var offset = 0
+            let pageSize = 100
+            while true {
+                let page = try await clientRef.collections(
+                    username: username, type: type, limit: pageSize, offset: offset
+                )
+                all.append(contentsOf: page.data)
+                // 本页不满（或为空）= 到末页；total 只是参考（个别响应缺失时不依赖它）
+                if page.data.count < pageSize { break }
+                if let total = page.total, all.count >= total { break }
+                offset += pageSize
+                // 尊重 bgm.tv 频率限制
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+            return all
         }
         inFlight[type] = task
         defer { inFlight[type] = nil }

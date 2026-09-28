@@ -168,9 +168,13 @@ final class OnlineStore: ObservableObject {
             return
         }
         isSearchingOnline = true
-        defer { isSearchingOnline = false }
         searchGeneration += 1
         let generation = searchGeneration
+        // spinner 只由最新一次搜索管理：旧搜索的 defer 若无条件关闭，
+        // 会把并行进行中的新搜索的 spinner 提前熄灭
+        defer {
+            if generation == searchGeneration { isSearchingOnline = false }
+        }
         var results: [OnlineShow] = []
         for provider in providers {
             do {
@@ -180,6 +184,8 @@ final class OnlineStore: ObservableObject {
                 results.append(contentsOf: found)
                 onlineSearchResults = results
             } catch {
+                // 过期搜索的失败消息同样不得覆盖界面
+                guard generation == searchGeneration else { return }
                 statusMessage = "\(provider.displayName) 搜索失败：\(error.localizedDescription)"
             }
         }
@@ -510,9 +516,18 @@ final class OnlineStore: ObservableObject {
     }
 
     private func applyWeeklySections(_ sections: [WeeklyShowSection]) {
-        weeklySections = sections
+        // 过滤已移除片源的番：当天缓存里可能还留着旧站点的条目，
+        // 不滤掉的话点开会永远停在"加载分集…"（provider 查不到）
+        let cleaned = sections.compactMap { section -> WeeklyShowSection? in
+            let shows = section.shows.filter { provider(id: $0.providerID) != nil }
+            guard !shows.isEmpty else { return nil }
+            var filtered = section
+            filtered.shows = shows
+            return filtered
+        }
+        weeklySections = cleaned
         isCalendarMode = true
-        let all = sections.flatMap(\.shows)
+        let all = cleaned.flatMap(\.shows)
         shows = all
         registerKnownShows(all)
     }
@@ -550,10 +565,17 @@ final class OnlineStore: ObservableObject {
         }
     }
 
-    /// 展开番条目/行出现时加载集列表（幂等）
-    func ensureEpisodes(for show: OnlineShow) async {
-        guard episodes[show.id] == nil else { return }
-        guard let provider = provider(id: show.providerID) else { return }
+    /// 展开番条目/行出现时加载集列表（幂等）。
+    /// 返回 true = 已有分集数据（可直接用）；false = 刚从网络拉取（调用方无需再强刷）
+    @discardableResult
+    func ensureEpisodes(for show: OnlineShow) async -> Bool {
+        if episodes[show.id] != nil { return true }
+        guard let provider = provider(id: show.providerID) else {
+            // 片源已被移除：落空列表让详情页结束加载态，而不是永远转圈
+            episodes[show.id] = []
+            statusMessage = "片源「\(show.providerID)」已移除，无法加载分集"
+            return true
+        }
         registerKnownShows([show])
         do {
             episodes[show.id] = try await provider.episodes(for: show.showID)
@@ -561,6 +583,7 @@ final class OnlineStore: ObservableObject {
             episodes[show.id] = []
             statusMessage = "\(provider.displayName) 集列表加载失败：\(error.localizedDescription)"
         }
+        return false
     }
 
     // MARK: - 点播
@@ -826,7 +849,11 @@ final class OnlineStore: ObservableObject {
             let task = Task {
                 await runDownload(show: item.show, episode: item.episode)
                 activeDownloadCount -= 1
-                cacheTasks[key] = nil
+                // 只在正常结束时清句柄：被取消的任务由 cancelCache 清。
+                // 否则"取消 → 立即重下"时，旧任务退出会抹掉新任务的句柄，二次取消失效
+                if !Task.isCancelled {
+                    cacheTasks[key] = nil
+                }
                 pumpDownloads() // 启动队列中的下一个
             }
             cacheTasks[key] = task
@@ -870,9 +897,12 @@ final class OnlineStore: ObservableObject {
             rebuildCachedItems()
             failedCaches[key] = nil
             statusMessage = "已缓存「\(show.title) 第 \(episode.number) 集」"
-        } catch is CancellationError {
-            // 用户取消：defer 已清理进度
         } catch {
+            // 用户取消（Task.isCancelled，或落在最后一轮请求里的 URLError.cancelled）：
+            // 不登记为失败——那是用户主动行为，出现"缓存失败 cancelled"只会困惑
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                return
+            }
             failedCaches[key] = FailedCacheItem(
                 id: key, show: show, episode: episode, message: error.localizedDescription
             )

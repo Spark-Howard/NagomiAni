@@ -87,16 +87,19 @@ final class LibraryViewModel: ObservableObject {
         seriesToRemove = nil
     }
 
-    /// 从番库移除某部番（删除它所属的目录索引，磁盘文件不受影响）
+    /// 从番库移除某部番：只删该番自己的索引与关联，磁盘文件不受影响。
+    /// ⚠️ 绝不能用 owningFolder + removeFolder——"一个根目录多部番"的典型布局下
+    /// owningFolder 是库根，会把根下所有番的索引与关联连带删掉。
+    /// 磁盘文件还在，登记忽略避免下次扫描把该番扫回库（重新添加目录时自动解除）。
     func confirmRemoveSeries() {
         guard let series = seriesToRemove else { return }
-        let folder = library.owningFolder(of: series.seriesKey) ?? series.seriesKey
-        library.removeFolder(folder)
+        library.removeSeries(series.seriesKey, ignoreFutureScans: true)
         subjects = subjects.filter { key, _ in
             library.series.contains { $0.subjectID == key }
         }
         seriesToRemove = nil
         reload()
+        statusMessage = "已从番库移除「\(series.displayName)」"
     }
 
     /// 只重扫某部番所在目录（检测新集补齐 / 文件删除）
@@ -186,8 +189,11 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    /// 自动匹配：为未关联的番生成候选（不自动绑定，等待用户确认）
+    /// 自动匹配：为未关联的番生成候选（不自动绑定，等待用户确认）。
+    /// 单实例运行：三个入口（启动/重扫完成/监控刷新）都可能触发，
+    /// 并发重跑会重复打全网搜索且 isMatching 状态互相踩。
     func runAutoMatch() async {
+        guard !isMatching else { return }
         let targets = library.series.filter { $0.matchState == .unmatched }
         guard !targets.isEmpty else { return }
         guard let client = await BangumiSession.makeClient() else { return }

@@ -962,12 +962,17 @@ struct SubjectDetailView: View {
         }
     }
 
+    /// DateFormatter 创建成本高，讨论/评论列表每行都格式化时间——必须缓存复用
+    private static let postDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }()
+
     private func formatDate(_ timestamp: Int64?) -> String {
         guard let timestamp, timestamp > 0 else { return "" }
         let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
-        return formatter.string(from: date)
+        return Self.postDateFormatter.string(from: date)
     }
 
     private func openURL(_ string: String?) {

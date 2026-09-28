@@ -26,6 +26,10 @@ final class SearchViewModel: ObservableObject {
 
     /// 我的收藏映射的最近拉取时间：避免每次进入页面都整表重拉
     private var collectionsLoadedAt: Date?
+    /// 上次建立收藏映射时的账号令牌（换账号后清空旧账号的徽章数据）
+    private var collectionsToken: String?
+    /// 搜索代次：并发搜索只采纳最后一次
+    private var searchGeneration = 0
     /// 收藏映射缓存有效期（搜索/详情页的收藏状态徽章，5 分钟内不重复拉）
     private let collectionsTTL: TimeInterval = 300
 
@@ -165,6 +169,14 @@ final class SearchViewModel: ObservableObject {
         if client == nil {
             client = BangumiClient()
         }
+        // 账号身份变化（登录/换号/登出）时清空旧账号的收藏徽章，
+        // 否则 5 分钟 TTL 内会继续显示上一个账号的收藏状态
+        let token = client?.accessToken
+        if token != collectionsToken {
+            collections.removeAll()
+            collectionsLoadedAt = nil
+            collectionsToken = token
+        }
     }
 
     // MARK: - 收藏
@@ -280,10 +292,12 @@ final class SearchViewModel: ObservableObject {
     func search() {
         let kw = keyword.trimmingCharacters(in: .whitespaces)
         guard !kw.isEmpty else { return }
-        Task { await performSearch(kw) }
+        searchGeneration += 1
+        let generation = searchGeneration
+        Task { await performSearch(kw, generation: generation) }
     }
 
-    private func performSearch(_ kw: String) async {
+    private func performSearch(_ kw: String, generation: Int) async {
         guard let client else {
             await prepareClient()
             guard let client else {
@@ -291,15 +305,23 @@ final class SearchViewModel: ObservableObject {
                 return
             }
             self.client = client
-            return await performSearch(kw)
+            return await performSearch(kw, generation: generation)
         }
+        // 代际守卫：并发搜索（快速连按回车）时先发慢返的旧结果
+        // 不得覆盖新结果；spinner 也只由最新一次搜索管理
+        guard generation == searchGeneration else { return }
         isSearching = true
         searchMessage = nil
-        defer { isSearching = false }
+        defer {
+            if generation == searchGeneration { isSearching = false }
+        }
         do {
-            results = try await searchAnime(keyword: kw)
-            if results.isEmpty { searchMessage = "没有找到动画条目，换个关键词试试" }
+            let found = try await searchAnime(keyword: kw)
+            guard generation == searchGeneration else { return }
+            results = found
+            if found.isEmpty { searchMessage = "没有找到动画条目，换个关键词试试" }
         } catch {
+            guard generation == searchGeneration else { return }
             results = []
             searchMessage = "搜索失败：\(Self.describe(error))"
         }

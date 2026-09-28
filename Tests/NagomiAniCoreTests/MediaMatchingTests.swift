@@ -30,6 +30,14 @@ final class MediaMatchingTests: XCTestCase {
         XCTAssertEqual(MediaMatching.parse(fileName: "01.标题.mkv").episodeNumber, 1)
     }
 
+    func testEpisodeParsingDigitPrefixedTitles() {
+        // 数字开头番名：标题里的数字不是集号（曾误判为 3 / 7）
+        XCTAssertNil(MediaMatching.parse(fileName: "3-gatsu no Lion 01.mkv").episodeNumber)
+        XCTAssertNil(MediaMatching.parse(fileName: "7 Seeds 02.mkv").episodeNumber)
+        // 带规范 "- NN" 尾缀的仍能正确解析
+        XCTAssertEqual(MediaMatching.parse(fileName: "3-gatsu no Lion - 01.mkv").episodeNumber, 1)
+    }
+
     // MARK: - 动漫圈常用命名格式
 
     func testEpisodeParsingAnimeFormats() {

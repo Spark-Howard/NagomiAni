@@ -19,14 +19,19 @@ public enum DirectoryChangePlanner {
     /// .nfo/.jpg/下载器临时文件等非视频不触发重扫。
     /// 已不存在的路径（删除事件）：空扩展名可能是被删的目录，保守放行
     /// （交由父目录重扫兜底）；非视频扩展名的必然与番库无关。
+    /// 存在但无扩展名的普通文件（Finder 一打开目录就会写的 .DS_Store 等）
+    /// 与番库无关——否则浏览目录 = 反复触发全递归重扫。
     public static func isRelevantPath(
         _ path: String,
-        isDirectory: (String) -> Bool
+        isDirectory: (String) -> Bool,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Bool {
         let ext = (path as NSString).pathExtension.lowercased()
         if MediaLibrary.videoExtensions.contains(ext) { return true }
         if isDirectory(path) { return true }
-        return ext.isEmpty
+        // 删除事件里路径已不存在：空扩展名可能是被删的目录，保守放行；
+        // 存在但无扩展名的普通文件（Finder 一开目录就会写的 .DS_Store 等）与番库无关
+        return ext.isEmpty && !fileExists(path)
     }
 
     public static func rescanTargets(

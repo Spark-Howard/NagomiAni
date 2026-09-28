@@ -77,7 +77,7 @@ struct LibraryPage: View {
                 model.cancelRemoveSeries()
             }
         } message: { series in
-            Text("从番库移除「\((series.seriesKey as NSString).lastPathComponent)」吗？该目录下的文件索引会被删除（磁盘文件不受影响）。")
+            Text("从番库移除「\((series.seriesKey as NSString).lastPathComponent)」吗？只删除该番自己的索引与关联，磁盘文件不受影响，也不会在下次扫描时重新出现（把所在目录重新添加进番库可再次入库）。")
         }
     }
 
@@ -393,8 +393,11 @@ struct LibraryPage: View {
                         }
                     }
                 }
-                // 本地有、但 Bangumi 列表里没有对应集号的文件（如无集号文件）
-                ForEach(series.files.filter { $0.episodeNumber == nil }) { file in
+                // 没能和 Bangumi 集数配对的本地文件也要显示：
+                // 无集号文件、集号超出 Bangumi 列表的（重编码/特典误解析等），
+                // 不渲染的话用户会以为文件丢了
+                let paired = Set(episodeRows(episodes, files: series.files).flatMap(\.files).map(\.id))
+                ForEach(series.files.filter { !paired.contains($0.id) }) { file in
                     fileRow(file)
                 }
             } else {

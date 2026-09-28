@@ -113,7 +113,8 @@ hdiutil create -volname "NagomiAni" -srcfolder "$STAGE" \
 MOUNT="/Volumes/NagomiAni"
 hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
 hdiutil attach "$RW" -nobrowse -mountpoint "$MOUNT" >/dev/null 2>&1
-if [ -z "$MOUNT" ]; then
+# 用挂载点目录存在性判断成败（$MOUNT 是常量，[ -z ] 永远为假）
+if [ ! -d "$MOUNT" ]; then
     echo "  ⚠ 挂载失败"
     exit 1
 fi

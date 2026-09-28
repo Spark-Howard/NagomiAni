@@ -343,6 +343,19 @@ final class OnlineStore: ObservableObject {
     @Published private(set) var weeklySections: [WeeklyShowSection] = []
     /// true = 目录来自放送日历聚合；false = 回退的站点目录
     @Published private(set) var isCalendarMode = false
+    /// 详情页当前展示的番（覆盖层导航：返回时目录滚动位置保留）
+    @Published private(set) var selectedShow: OnlineShow?
+
+    /// 进入番详情（封面卡片点击）
+    func open(_ show: OnlineShow) {
+        registerKnownShows([show])
+        selectedShow = show
+    }
+
+    /// 返回目录
+    func back() {
+        selectedShow = nil
+    }
 
     func loadShowsIfNeeded() async {
         guard !showsLoaded, !isLoadingShows else { return }

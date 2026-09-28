@@ -1,18 +1,44 @@
 import SwiftUI
 import NagomiAniCore
 
-/// 在线片源页（侧边栏「在线」）
+/// 在线片源页（侧边栏「在线」）。
+/// 排布与搜索页「过去一周」一致：按天分组 + 横向高清封面卡片，
+/// 点击卡片进入番详情（覆盖层）查看分集/播放/缓存。
 struct OnlinePage: View {
     @ObservedObject var model: OnlineStore
     /// 点击某一集时回调（由外层切换到播放器页并加载在线流）
     var onPlay: (OnlinePlayback) -> Void
 
-    @State private var expandedShows: Set<String> = []
-    @State private var preparingEpisodeID: String?
     @State private var showSourceSheet = false
     @State private var searchKeyword = ""
 
+    static let coverWidth: CGFloat = 112
+    static let coverHeight: CGFloat = 152
+
     var body: some View {
+        ZStack {
+            // 目录常驻：进详情以覆盖层展示，返回时滚动位置保留
+            directoryView
+            if let show = model.selectedShow {
+                OnlineShowDetailView(store: model, show: show, onPlay: onPlay)
+                    .background(NagomiTheme.pageBackground)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle("在线")
+        .task {
+            await model.loadShowsIfNeeded()
+            model.refreshCacheState()
+        }
+        .sheet(isPresented: $showSourceSheet) {
+            OnlineSourceSheet(model: model)
+        }
+        // 绑定 sheet 由 ContentView 根视图统一呈现（番库页也会触发）
+    }
+
+    // MARK: - 目录
+
+    private var directoryView: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             searchBar
@@ -25,18 +51,7 @@ struct OnlinePage: View {
         }
         .padding(20)
         .frame(minWidth: 520, minHeight: 480)
-        .navigationTitle("在线")
-        .task {
-            await model.loadShowsIfNeeded()
-            model.refreshCacheState()
-        }
-        .sheet(isPresented: $showSourceSheet) {
-            OnlineSourceSheet(model: model)
-        }
-        // 绑定 sheet 由 ContentView 根视图统一呈现（番库页也会触发）
     }
-
-    // MARK: - 视图
 
     private var header: some View {
         HStack {
@@ -56,7 +71,7 @@ struct OnlinePage: View {
             } label: {
                 Label("添加片源", systemImage: "plus.circle")
             }
-            .controlSize(.small)
+            .buttonStyle(NagomiSecondaryButtonStyle())
             if model.isPreparing || model.isLoadingShows {
                 ProgressView()
                     .controlSize(.small)
@@ -73,6 +88,7 @@ struct OnlinePage: View {
             Button("搜索") {
                 searchOnline()
             }
+            .buttonStyle(NagomiSecondaryButtonStyle())
             .disabled(searchKeyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearchingOnline)
             if model.isSearchingOnline {
                 ProgressView()
@@ -94,10 +110,14 @@ struct OnlinePage: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.shows.isEmpty {
+        if model.shows.isEmpty && model.onlineSearchResults == nil {
             emptyState
+        } else if model.isCalendarMode, model.onlineSearchResults == nil {
+            weekSectionsView
+        } else if let results = model.onlineSearchResults {
+            coverGrid(results)
         } else {
-            showList
+            coverGrid(model.shows)
         }
     }
 
@@ -117,172 +137,278 @@ struct OnlinePage: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var showList: some View {
+    // MARK: - 放送日历分组（与搜索页「过去一周」同构）
+
+    private var weekSectionsView: some View {
         ScrollView {
-            LazyVStack(spacing: 6) {
-                if model.isCalendarMode, model.onlineSearchResults == nil {
-                    // 放送日历模式：按「今天 → 前 6 天」分组，与 Bangumi 过去一周完全一致
-                    ForEach(model.weeklySections) { section in
-                        NagomiSectionHeader(
-                            title: section.title == "今天"
-                                ? "今天 · \(section.dateText)"
-                                : "\(section.title) \(section.dateText)",
-                            systemImage: "calendar"
-                        )
-                        ForEach(section.shows) { show in
-                            showRow(show)
-                        }
-                    }
-                } else {
-                    ForEach(list) { show in
-                        showRow(show)
-                    }
+            // VStack 非懒加载：嵌套横向滚动时避免懒容器测量出错导致某些天不渲染
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(model.weeklySections) { section in
+                    daySection(section)
                 }
             }
+            .padding(.bottom, 12)
         }
     }
 
-    /// 搜索结果优先，否则浏览默认目录
-    private var list: [OnlineShow] {
-        model.onlineSearchResults ?? model.shows
+    private func daySection(_ section: OnlineStore.WeeklyShowSection) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text(section.title)
+                    .font(.caption.bold())
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(
+                        section.title == "今天" ? NagomiTheme.accent.opacity(0.2) : Color.gray.opacity(0.12),
+                        in: Capsule()
+                    )
+                    .foregroundStyle(section.title == "今天" ? NagomiTheme.accent : Color.primary)
+                Text(section.dateText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(section.shows.count) 部")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 4)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 12) {
+                    ForEach(section.shows) { show in
+                        coverCard(show)
+                    }
+                }
+                .padding(.bottom, 4)
+            }
+        }
+        .padding(.vertical, 6)
     }
 
-    private func showRow(_ show: OnlineShow) -> some View {
-        DisclosureGroup(isExpanded: expandedBinding(show)) {
-            let eps = model.episodes[show.id] ?? []
-            ForEach(eps) { episode in
-                episodeRow(show: show, episode: episode)
-            }
-            if eps.isEmpty {
-                HStack {
-                    Spacer()
-                    ProgressView().controlSize(.small)
-                    Spacer()
-                }
-                .padding(.vertical, 6)
-            }
+    /// 封面卡片（高清图作为按钮）：点击进入番详情
+    private func coverCard(_ show: OnlineShow) -> some View {
+        Button {
+            model.open(show)
         } label: {
-            HStack(spacing: 10) {
-                coverView(show)
-                VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 5) {
+                coverImage(show)
+                    .frame(width: Self.coverWidth, height: Self.coverHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(alignment: .topTrailing) {
+                        if let newCount = model.newEpisodeCount(for: show) {
+                            NagomiBadge(text: "新集 \(newCount)", foreground: .white,
+                                        background: NagomiTheme.accent)
+                                .padding(4)
+                        }
+                    }
+
+                Text(show.title)
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: Self.coverWidth, alignment: .leading)
+
+                NagomiBadge(
+                    text: model.binding(for: show.seriesKey) != nil ? "已关联" : "未关联",
+                    foreground: model.binding(for: show.seriesKey) != nil ? .green : .secondary,
+                    background: model.binding(for: show.seriesKey) != nil
+                        ? Color.green.opacity(0.15) : Color.gray.opacity(0.15)
+                )
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 高清封面：聚合条目带 Bangumi 封面 / 站点条目带图床封面 / 占位芯片
+    @ViewBuilder
+    private func coverImage(_ show: OnlineShow) -> some View {
+        if let url = show.coverURL.flatMap(SearchPage.imageURL) {
+            CoverImageView(url: url, cornerRadius: 0)
+        } else {
+            Image(systemName: "play.tv")
+                .font(.system(size: 28))
+                .foregroundStyle(NagomiTheme.accent)
+                .frame(width: Self.coverWidth, height: Self.coverHeight)
+                .background(NagomiTheme.accentSoft)
+        }
+    }
+
+    /// 竖向封面网格（站点回退目录 / 搜索结果）
+    private func coverGrid(_ shows: [OnlineShow]) -> some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: Self.coverWidth), spacing: 12)], spacing: 14) {
+                ForEach(shows) { show in
+                    coverCard(show)
+                }
+            }
+            .padding(.bottom, 12)
+        }
+    }
+
+    // MARK: - 详情（覆盖层）
+
+    /// 番详情：大封面 + 信息 + 分集列表（点封面卡片进入）
+    struct OnlineShowDetailView: View {
+        @ObservedObject var store: OnlineStore
+        let show: OnlineShow
+        var onPlay: (OnlinePlayback) -> Void
+
+        @State private var preparingEpisodeID: String?
+        @State private var isRefreshing = false
+
+        var body: some View {
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Button {
+                        store.back()
+                    } label: {
+                        Label("返回在线", systemImage: "chevron.left")
+                    }
+                    .buttonStyle(.plain)
                     Text(show.title)
                         .font(.headline)
                         .lineLimit(1)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        headerSection
+                        Divider()
+                        episodesSection
+                    }
+                    .padding(20)
+                }
+            }
+            .task {
+                await store.ensureEpisodes(for: show)
+                await store.refreshEpisodes(for: show) // 打开详情 = 检查更新（拉取式）
+                store.markEpisodesSeen(show)
+                await store.refreshWatched(for: show)
+            }
+        }
+
+        private var headerSection: some View {
+            HStack(alignment: .top, spacing: 14) {
+                Group {
+                    if let url = show.coverURL.flatMap(SearchPage.imageURL) {
+                        CoverImageView(url: url, cornerRadius: 0)
+                    } else {
+                        Image(systemName: "play.tv")
+                            .font(.system(size: 32))
+                            .foregroundStyle(NagomiTheme.accent)
+                            .frame(width: 132, height: 176)
+                            .background(NagomiTheme.accentSoft)
+                    }
+                }
+                .frame(width: 132, height: 176)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(show.title)
+                        .font(.title3.bold())
+                    if let subtitle = show.subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     HStack(spacing: 6) {
-                        bindBadge(show)
-                        // 未关联且已有自动匹配结果时提示建议数（与番库同规则：已关联后隐藏）
-                        if model.binding(for: show.seriesKey) == nil,
-                           let candidates = model.bindCandidates[show.id], !candidates.isEmpty {
-                            Text("建议 \(candidates.count)")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
+                        if store.binding(for: show.seriesKey) != nil {
+                            NagomiBadge(text: "已关联", foreground: .green, background: Color.green.opacity(0.15))
+                        } else {
+                            NagomiBadge(text: "未关联", foreground: .secondary, background: Color.gray.opacity(0.15))
                         }
-                        if let subject = boundSubject(show) {
-                            Text(subject.displayName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        } else if let subtitle = show.subtitle, !subtitle.isEmpty {
-                            Text(subtitle)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        if show.providerID != "mock", let siteName = model.providerName(for: show) {
-                            Text(siteName)
-                                .font(.caption2)
-                                .foregroundStyle(.orange)
-                                .lineLimit(1)
+                        if let newCount = store.newEpisodeCount(for: show) {
+                            NagomiBadge(text: "新集 \(newCount)", foreground: .orange, background: Color.orange.opacity(0.15))
                         }
                     }
+                    HStack(spacing: 8) {
+                        Button {
+                            store.bindTarget = show
+                        } label: {
+                            Label(store.binding(for: show.seriesKey) != nil ? "更换关联" : "关联 Bangumi",
+                                  systemImage: "link")
+                        }
+                        .buttonStyle(NagomiSecondaryButtonStyle())
+
+                        Button {
+                            if store.isInLibrary(show) {
+                                store.removeFromLibrary(show)
+                            } else {
+                                store.addToLibrary(show)
+                            }
+                        } label: {
+                            Label(store.isInLibrary(show) ? "移出番库" : "加入番库",
+                                  systemImage: store.isInLibrary(show) ? "bookmark.fill" : "bookmark")
+                        }
+                        .buttonStyle(NagomiSecondaryButtonStyle())
+                    }
+                    Text("已关联的番播完会自动同步「看过」到 Bangumi")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
                 Spacer()
-                // 加入/移出番库：加入后与本地番并列显示在番库页（云端标记）
-                Button {
-                    if model.isInLibrary(show) {
-                        model.removeFromLibrary(show)
-                    } else {
-                        model.addToLibrary(show)
-                    }
-                } label: {
-                    Image(systemName: model.isInLibrary(show) ? "bookmark.fill" : "bookmark")
-                }
-                .buttonStyle(NagomiIconButtonStyle())
-                .help(model.isInLibrary(show) ? "从番库移除" : "加入番库")
-                bindButton(for: show)
-                if model.binding(for: show.seriesKey) != nil {
+            }
+        }
+
+        private var episodesSection: some View {
+            let eps = store.episodes[show.id] ?? []
+            return VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("分集")
+                        .font(.headline)
+                    Text("\(eps.count) 集")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
                     Button {
-                        model.unbind(for: show)
+                        Task {
+                            isRefreshing = true
+                            await store.refreshEpisodes(for: show)
+                            store.markEpisodesSeen(show)
+                            await store.refreshWatched(for: show)
+                            isRefreshing = false
+                        }
                     } label: {
-                        Image(systemName: "xmark.circle")
+                        Label("检查更新", systemImage: "arrow.clockwise")
                     }
-                    .buttonStyle(NagomiIconButtonStyle())
-                    .help("解除关联")
+                    .controlSize(.small)
+                    .disabled(isRefreshing)
+                }
+                if eps.isEmpty {
+                    HStack {
+                        Spacer()
+                        ProgressView("加载分集…")
+                        Spacer()
+                    }
+                    .padding(.vertical, 20)
+                } else {
+                    LazyVStack(spacing: 2) {
+                        ForEach(eps) { episode in
+                            episodeRow(episode)
+                        }
+                    }
                 }
             }
         }
-        .padding(10)
-        .nagomiCard(cornerRadius: 8)
-.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 8))
-        // 行出现即加载集列表（幂等）
-        .task(id: show.id) { await model.ensureEpisodes(for: show) }
-        // 行出现时补拉已关联条目的封面/名称
-        .task(id: "\(show.id)-subject") { await model.ensureSubject(for: show) }
-    }
 
-    /// 行封面：聚合条目自带 Bangumi 封面 → 已关联条目的封面 → 占位图标
-    @ViewBuilder
-    private func coverView(_ show: OnlineShow) -> some View {
-        if let url = show.coverURL.flatMap(SearchPage.imageURL) {
-            CoverImageView(url: url, cornerRadius: 4)
-                .frame(width: 44, height: 60)
-        } else if let subject = boundSubject(show),
-                  let url = SearchPage.imageURL(subject.images?.common) {
-            CoverImageView(url: url, cornerRadius: 4)
-                .frame(width: 44, height: 60)
-        } else {
-            Image(systemName: "play.tv")
-                .font(.system(size: 20))
-                .foregroundStyle(.tint)
-                .frame(width: 44, height: 60)
-                .background(NagomiTheme.accentSoft, in: RoundedRectangle(cornerRadius: 6))
-        }
-    }
-
-    private func boundSubject(_ show: OnlineShow) -> Subject? {
-        model.binding(for: show.seriesKey).flatMap { model.subjects[$0] }
-    }
-
-    @ViewBuilder
-    private func bindBadge(_ show: OnlineShow) -> some View {
-        if model.binding(for: show.seriesKey) != nil {
-            NagomiBadge(text: "已关联", foreground: .green, background: Color.green.opacity(0.15))
-        } else {
-            NagomiBadge(text: "未关联", foreground: .secondary, background: Color.gray.opacity(0.15))
-        }
-    }
-
-    private func bindButton(for show: OnlineShow) -> some View {
-        Button {
-            model.bindTarget = show
-        } label: {
-            Text(model.binding(for: show.seriesKey) != nil ? "更换" : "关联")
-        }
-        .buttonStyle(NagomiSecondaryButtonStyle())
-    }
-
-    /// 集行：主体是播放按钮（含已看徽章），尾部是独立的缓存控制按钮（不能嵌套进播放按钮）
-    private func episodeRow(show: OnlineShow, episode: OnlineEpisode) -> some View {
-        HStack(spacing: 8) {
+        private func episodeRow(_ episode: OnlineEpisode) -> some View {
             Button {
-                play(show: show, episode: episode)
+                play(episode)
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "play.circle")
-                        .foregroundStyle(.tint)
+                        .foregroundStyle(NagomiTheme.accent)
                     Text(episode.title ?? "第 \(episode.number) 集")
                         .font(.callout)
                         .lineLimit(1)
-                    if model.isWatched(episode) {
+                    if store.isWatched(episode) {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.caption)
                             .foregroundStyle(.green)
@@ -294,24 +420,45 @@ struct OnlinePage: View {
                         ProgressView().controlSize(.mini)
                     }
                     Spacer()
+                    OnlineCacheControl(store: store, show: show, episode: episode)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.primary)
-            cacheControl(show: show, episode: episode)
+            .padding(.vertical, 5)
+            .padding(.horizontal, 6)
+            .nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 6))
         }
-        .padding(.leading, 54)
-        .padding(.vertical, 4)
+
+        private func play(_ episode: OnlineEpisode) {
+            guard preparingEpisodeID == nil else { return } // 上一次取流还没完成，忽略连点
+            preparingEpisodeID = episode.id
+            Task {
+                defer { preparingEpisodeID = nil }
+                do {
+                    let target = try await store.preparePlayback(show: show, episode: episode)
+                    onPlay(target)
+                } catch {
+                    store.statusMessage = "播放失败：\(error.localizedDescription)"
+                }
+            }
+        }
     }
 
-    /// 集行尾部的缓存控制：未缓存=下载、下载中=进度条+字节数+取消、已缓存=徽章+大小+删除
-    @ViewBuilder
-    private func cacheControl(show: OnlineShow, episode: OnlineEpisode) -> some View {
-        switch model.cacheState(for: episode) {
+} 
+
+/// 分集行尾部的缓存控制（详情页用）：未缓存=下载、下载中=进度条+字节数+取消、已缓存=徽章+大小+删除
+struct OnlineCacheControl: View {
+    @ObservedObject var store: OnlineStore
+    let show: OnlineShow
+    let episode: OnlineEpisode
+
+    var body: some View {
+        switch store.cacheState(for: episode) {
         case .notCached:
             Button {
-                model.startCache(show: show, episode: episode)
+                store.startCache(show: show, episode: episode)
             } label: {
                 Image(systemName: "arrow.down.circle")
             }
@@ -334,7 +481,7 @@ struct OnlinePage: View {
                     .foregroundStyle(.secondary)
             }
             Button {
-                model.cancelCache(for: episode)
+                store.cancelCache(for: episode)
             } label: {
                 Image(systemName: "xmark.circle")
             }
@@ -345,7 +492,7 @@ struct OnlinePage: View {
                 Text("已缓存")
                     .font(.caption2)
                     .foregroundStyle(.green)
-                if let size = model.cacheSize(for: episode) {
+                if let size = store.cacheSize(for: episode) {
                     Text(OnlineStore.formattedBytes(size))
                         .font(.caption2)
                         .monospacedDigit()
@@ -353,47 +500,13 @@ struct OnlinePage: View {
                 }
             }
             Button {
-                model.removeCache(for: episode)
+                store.removeCache(for: episode)
             } label: {
                 Image(systemName: "trash")
             }
             .buttonStyle(NagomiIconButtonStyle(size: 22))
             .help("删除本地缓存")
         }
-    }
-
-    // MARK: - 动作
-
-    private func play(show: OnlineShow, episode: OnlineEpisode) {
-        guard preparingEpisodeID == nil else { return } // 上一次取流还没完成，忽略连点
-        preparingEpisodeID = episode.id
-        Task {
-            defer { preparingEpisodeID = nil }
-            do {
-                let target = try await model.preparePlayback(show: show, episode: episode)
-                onPlay(target)
-            } catch {
-                model.statusMessage = "播放失败：\(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func expandedBinding(_ show: OnlineShow) -> Binding<Bool> {
-        Binding(
-            get: { expandedShows.contains(show.id) },
-            set: { expanded in
-                if expanded {
-                    expandedShows.insert(show.id)
-                    // 在这里查看过分集同样算"已看过"（更新提醒基准）；顺带刷新已看徽章
-                    Task {
-                        await model.refreshWatched(for: show)
-                        model.markEpisodesSeen(show)
-                    }
-                } else {
-                    expandedShows.remove(show.id)
-                }
-            }
-        )
     }
 }
 
@@ -469,7 +582,7 @@ struct OnlineSourceSheet: View {
 
             Spacer()
 
-            Text("说明：内置源为公开采集接口的苹果CMS 资源站；也可粘贴其它站点首页地址自动拼接接口路径。内容均来自互联网公开接口，请遵守站点条款与当地法规。")
+            Text("说明：内置源为公开采集接口的苹果CMS 资源站；也可粘贴其它站点首页地址自动拼接接口路径 /api.php/provide/vod/。内容均来自互联网公开接口，请遵守站点条款与当地法规。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             HStack {
@@ -611,8 +724,7 @@ struct OnlineBindSheet: View {
                 .foregroundStyle(.secondary)
         }
         .padding(6)
-        .nagomiCard(cornerRadius: 6)
-.nagomiHoverHighlight(in: RoundedRectangle(cornerRadius: 6))
+        .background(NagomiTheme.accentSoft.opacity(0.4), in: RoundedRectangle(cornerRadius: 6))
     }
 
     private func subjectRow(_ subject: Subject) -> some View {

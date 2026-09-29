@@ -653,9 +653,19 @@ struct OnlineBindSheet: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Text("为「\(show.title)」关联 Bangumi 条目")
-                .font(.headline)
-                .lineLimit(1)
+            HStack(spacing: 8) {
+                Text("为「\(show.title)」关联 Bangumi 条目")
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(NagomiIconButtonStyle(size: 22))
+                .help("关闭（不关联）")
+            }
 
             // 自动匹配结果（与番库同一套评分机制）
             if model.isLoadingCandidates {

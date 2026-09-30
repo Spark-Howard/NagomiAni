@@ -11,6 +11,10 @@ import NagomiAniCore
 /// 右侧网页登录并点「授权」→ 自动回到本页并同步收藏），本页不再弹独立授权窗。
 struct BangumiPage: View {
     @ObservedObject var model: AccountViewModel
+    /// 在线片源状态（详情页「在线观看」区使用；与搜索页共用同一实例）
+    @ObservedObject var online: OnlineStore
+    /// 在线点播回调（由 ContentView 切到播放器页加载）
+    var onPlayOnline: (OnlinePlayback) -> Void
     /// 统一登录入口（由 ContentView 提供：切到聊天页驱动登录，完成后自动回到本页）
     let onStartLogin: () -> Void
     /// 本模块详情页专用模型（隔离于搜索页的选中/详情状态）
@@ -19,7 +23,8 @@ struct BangumiPage: View {
     var body: some View {
         Group {
             if let subject = detail.selected {
-                SubjectDetailView(model: detail, subject: subject, backLabel: "返回")
+                SubjectDetailView(model: detail, subject: subject, backLabel: "返回",
+                                  online: online, onPlayOnline: onPlayOnline)
             } else {
                 accountContent
             }

@@ -142,6 +142,9 @@ final class OnlineStore: ObservableObject {
         sites.append(normalized)
         UserDefaults.standard.set(sites, forKey: Self.sitesKey)
         rebuildProviders()
+        // 站点列表变了：详情页「在线观看」的片源匹配结果作废，重新展开时重搜
+        sourceMatches.removeAll()
+        sourceMatchMessages.removeAll()
         statusMessage = "已添加片源：\(provider.displayName)"
         Task { await reloadShows() }
     }
@@ -150,6 +153,8 @@ final class OnlineStore: ObservableObject {
         sites.removeAll { $0 == raw }
         UserDefaults.standard.set(sites, forKey: Self.sitesKey)
         rebuildProviders()
+        sourceMatches.removeAll()
+        sourceMatchMessages.removeAll()
         statusMessage = "已移除片源"
         Task { await reloadShows() }
     }
@@ -629,6 +634,53 @@ final class OnlineStore: ObservableObject {
 
     private func provider(id: String) -> SourceProvider? {
         providers.first { $0.id == id }
+    }
+
+    // MARK: - 搜索详情页「在线观看」：按条目按需搜片源
+
+    /// Bangumi 条目 id → 匹配到的片源番（按标题相似度+季号加成降序）
+    @Published private(set) var sourceMatches: [String: [OnlineShow]] = [:]
+    @Published private(set) var isLoadingSourceMatches: Set<String> = []
+    @Published private(set) var sourceMatchMessages: [String: String] = [:]
+    /// 片源搜索代次：切换条目后旧搜索的结果/错误不得覆盖新条目
+    private var sourceMatchGeneration = 0
+
+    /// 按条目标题跨站搜片源并评分排序（搜索详情页展开「在线观看」时触发）。
+    /// 铁律：相似度比较前双侧过 cleanTitle（与放送日历聚合同一套口径，§4.19）；
+    /// 代际守卫防旧条目的慢结果覆盖新条目。
+    func searchSources(for subject: Subject) async {
+        let subjectKey = String(subject.id)
+        if sourceMatches[subjectKey] != nil || isLoadingSourceMatches.contains(subjectKey) { return }
+        let title = subject.displayName
+        guard !title.isEmpty else {
+            sourceMatchMessages[subjectKey] = "该条目没有可用标题，无法搜索片源"
+            return
+        }
+        isLoadingSourceMatches.insert(subjectKey)
+        sourceMatchMessages[subjectKey] = nil
+        defer { isLoadingSourceMatches.remove(subjectKey) }
+        sourceMatchGeneration += 1
+        let generation = sourceMatchGeneration
+
+        var pool: [OnlineShow] = []
+        for provider in providers {
+            do {
+                let found = try await provider.search(keyword: title)
+                guard generation == sourceMatchGeneration else { return }
+                registerKnownShows(found)
+                pool.append(contentsOf: found)
+            } catch {
+                // 单站失败不中断（与跨站搜索同策略），但记录一条提示
+                guard generation == sourceMatchGeneration else { return }
+                sourceMatchMessages[subjectKey] = "\(provider.displayName) 搜索失败：\(error.localizedDescription)"
+            }
+        }
+        guard generation == sourceMatchGeneration else { return }
+        let scored = WeeklyAggregator.score(title, candidates: pool)
+        sourceMatches[subjectKey] = scored.map(\.show)
+        if scored.isEmpty, sourceMatchMessages[subjectKey] == nil {
+            sourceMatchMessages[subjectKey] = "各片源站未找到与「\(title)」对应的资源，可稍后重试或手动添加片源"
+        }
     }
 
     // MARK: - 追番更新提醒（拉取式：展开云端番时刷新分集并对比上次查看数量）

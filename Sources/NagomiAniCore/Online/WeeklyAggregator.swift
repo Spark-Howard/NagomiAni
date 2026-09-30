@@ -70,6 +70,23 @@ public enum WeeklyAggregator {
         return best
     }
 
+    /// 为一个 Bangumi 条目标题在候选池里**评分排序**（搜索详情页「在线观看」按需搜源用）。
+    /// 与聚合同口径：双侧 cleanTitle 清洗 + 季号一致加分；低于阈值的丢弃，
+    /// 按分数降序（同分保持传入顺序，即站点优先级）。
+    public static func score(_ subjectTitle: String, candidates: [OnlineShow]) -> [(show: OnlineShow, score: Double)] {
+        let subjectSeason = MediaMatching.seasonNumber(from: subjectTitle)
+        return candidates.compactMap { candidate in
+            var score = TitleSimilarity.similarity(subjectTitle, normalize(candidate.title))
+            if let subjectSeason, let candidateSeason = MediaMatching.seasonNumber(from: candidate.title),
+               subjectSeason == candidateSeason {
+                score += seasonBonus
+            }
+            guard score >= matchThreshold else { return nil }
+            return (candidate, score)
+        }
+        .sorted { $0.score > $1.score }
+    }
+
     /// 聚合条目：Bangumi 正题/封面/subjectID + 命中站点的流
     public static func makeEntry(subject: CalendarSubject, source: OnlineShow) -> OnlineShow {
         OnlineShow(

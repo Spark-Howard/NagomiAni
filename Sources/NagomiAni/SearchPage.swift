@@ -2,11 +2,19 @@ import AppKit
 import SwiftUI
 import NagomiAniCore
 
-/// 浏览页：搜索 Bangumi 词条 → 查看剧目详情（仿 Bangumi 条目页布局）
+/// 浏览页：搜索 Bangumi 词条 → 查看剧目详情（仿 Bangumi 条目页布局）。
+/// 详情页内置「在线观看」区（按需跨站搜片源 → 播放/缓存）；
+/// 「在线」独立模块已并入本页（2026-09-29 用户决策）。
 struct SearchPage: View {
     @ObservedObject var model: SearchViewModel
+    /// 在线片源状态（与番库云端行共用同一实例：绑定表/缓存/已看徽章）
+    @ObservedObject var online: OnlineStore
+    /// 点击某一集时回调（由外层切到播放器页并加载在线流）
+    var onPlayOnline: (OnlinePlayback) -> Void
     /// 屏幕缩放（1 / 2 / 3）：用来按物理像素挑选封面分辨率，避免 Retina 上发糊
     @Environment(\.displayScale) private var displayScale
+    @State private var showSourceSheet = false
+    @State private var showCacheSheet = false
 
     var body: some View {
         ZStack {
@@ -14,15 +22,23 @@ struct SearchPage: View {
             searchListView
             // 详情以覆盖层形式展示：返回时列表不重建，滚动条位置保留
             if let subject = model.selected {
-                SubjectDetailView(model: model, subject: subject)
+                SubjectDetailView(model: model, subject: subject,
+                                  online: online, onPlayOnline: onPlayOnline)
                     .background(Color(nsColor: .windowBackgroundColor))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("搜索")
-        // 进入页面时刷新登录状态与我的收藏
+        // 进入页面时刷新登录状态与我的收藏；恢复缓存状态展示（原「在线」页的职责并入本页）
         .onAppear {
             model.refresh()
+            online.refreshCacheState()
+        }
+        .sheet(isPresented: $showSourceSheet) {
+            OnlineSourceSheet(model: online)
+        }
+        .sheet(isPresented: $showCacheSheet) {
+            OnlineCacheSheet(model: online, onPlay: onPlayOnline)
         }
     }
 
@@ -40,6 +56,24 @@ struct SearchPage: View {
                     Label("搜索", systemImage: "magnifyingglass")
                 }
                 .disabled(model.keyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearching)
+                // 原「在线」模块的入口并入此处（详情页的在线观看为主路径）
+                Button {
+                    showCacheSheet = true
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                }
+                .buttonStyle(NagomiIconButtonStyle())
+                .disabled(online.cachedItems.isEmpty
+                          && online.cacheProgress.isEmpty
+                          && online.failedCaches.isEmpty)
+                .help("我的缓存")
+                Button {
+                    showSourceSheet = true
+                } label: {
+                    Image(systemName: "server.rack")
+                }
+                .buttonStyle(NagomiIconButtonStyle())
+                .help("添加片源")
             }
             .padding(.horizontal, 16)
             .padding(.top, 12)
@@ -317,6 +351,10 @@ struct SubjectDetailView: View {
     let subject: Subject
     /// 返回按钮文案（搜索页默认「返回搜索」，Bangumi 收藏页用「返回」）
     var backLabel: String = "返回搜索"
+    /// 在线片源状态（nil = 不展示在线观看区）；与番库云端行共用同一实例
+    var online: OnlineStore? = nil
+    /// 点播回调（由外层切到播放器页并加载在线流）
+    var onPlayOnline: ((OnlinePlayback) -> Void)? = nil
     @State private var tab: DetailTab = .episodes
     /// 待确认的收藏动作（非 nil 时弹出确认框）
     @State private var pendingAction: CollectionAction?
@@ -324,6 +362,10 @@ struct SubjectDetailView: View {
     @State private var showAllInfobox = false
     /// 联系人（聊天板块数据；讨论/评论作者可一键加入）
     @EnvironmentObject private var contacts: ContactsStore
+    /// 在线观看区：是否展开、展开哪个片源番、点播错误消息
+    @State private var showOnlineSection = false
+    @State private var expandedSourceID: String?
+    @State private var onlineMessage: String?
 
     enum CollectionAction {
         case set(SubjectCollectionType)
@@ -374,6 +416,7 @@ struct SubjectDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     headerSection
+                    onlineSection
                     if let summary = detailSummary, !summary.isEmpty {
                         summarySection(summary)
                     }
@@ -400,6 +443,182 @@ struct SubjectDetailView: View {
                     .padding(.vertical, 6)
                     .background(.ultraThinMaterial, in: Capsule())
                     .padding(.top, 50)
+            }
+        }
+    }
+
+    // MARK: - 在线观看（按需跨站搜片源：播放 / 缓存 / 已看徽章，与番库云端行同一套数据）
+
+    /// 片源匹配用条目：详情加载完成后用完整条目（收藏页打开的条目可能只有 id/原名）
+    private var onlineSearchSubject: Subject {
+        model.detailSubject ?? subject
+    }
+
+    @ViewBuilder
+    private var onlineSection: some View {
+        if let online {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "play.tv")
+                        .foregroundStyle(NagomiTheme.accent)
+                    Text("在线观看")
+                        .font(.headline)
+                    Text("从片源站搜索本作资源，可在线播放或缓存到本地")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    Button(showOnlineSection ? "收起" : "搜索片源") {
+                        showOnlineSection.toggle()
+                        if showOnlineSection {
+                            Task { await online.searchSources(for: onlineSearchSubject) }
+                        }
+                    }
+                    .buttonStyle(NagomiSecondaryButtonStyle())
+                }
+                if showOnlineSection {
+                    onlineSourceList(online)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func onlineSourceList(_ online: OnlineStore) -> some View {
+        let key = String(onlineSearchSubject.id)
+        VStack(alignment: .leading, spacing: 8) {
+            if online.isLoadingSourceMatches.contains(key) {
+                ProgressView("正在搜索片源…")
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else if let matches = online.sourceMatches[key], !matches.isEmpty {
+                Text("共 \(matches.count) 个片源，点开选择分集播放或缓存")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(matches) { match in
+                    onlineSourceCard(online, match: match)
+                }
+            } else {
+                Text(online.sourceMatchMessages[key] ?? "未找到片源")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let message = onlineMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(12)
+        .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// 片源卡片：站点+标题+关联徽章，点开显示分集行
+    private func onlineSourceCard(_ online: OnlineStore, match: OnlineShow) -> some View {
+        let expanded = expandedSourceID == match.id
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                expandedSourceID = expanded ? nil : match.id
+                if !expanded {
+                    Task {
+                        await online.ensureEpisodes(for: match)
+                        // 已绑定（首播时自动写入）才拉得到已看徽章；未绑定静默跳过
+                        await online.refreshWatched(for: match)
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(match.title)
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                        HStack(spacing: 6) {
+                            if let site = online.providerName(for: match) {
+                                Text(site)
+                            }
+                            if online.binding(for: match.seriesKey) == subject.id {
+                                NagomiBadge(text: "已关联", foreground: .green, background: .green.opacity(0.15))
+                            }
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "play.circle")
+                        .foregroundStyle(NagomiTheme.accent)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                if let episodes = online.episodes[match.id] {
+                    if episodes.isEmpty {
+                        Text("该站点未返回分集")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(episodes) { episode in
+                            onlineEpisodeRow(online, match: match, episode: episode)
+                        }
+                    }
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        }
+        .padding(10)
+        .background(NagomiTheme.accentSoft.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// 分集行：主体=播放按钮，尾部独立缓存控件（不可嵌套进按钮 label）
+    private func onlineEpisodeRow(_ online: OnlineStore, match: OnlineShow, episode: OnlineEpisode) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                playOnline(online, match: match, episode: episode)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "play.circle.fill")
+                        .foregroundStyle(NagomiTheme.accent)
+                    Text("第 \(episode.number) 集")
+                        .font(.callout)
+                        .monospacedDigit()
+                    if let title = episode.title, !title.isEmpty, title != "第 \(episode.number) 集" {
+                        Text(title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    if online.isWatched(episode) {
+                        NagomiBadge(text: "已看", foreground: .green, background: .green.opacity(0.15))
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            OnlineCacheControl(store: online, show: match, episode: episode)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func playOnline(_ online: OnlineStore, match: OnlineShow, episode: OnlineEpisode) {
+        Task {
+            do {
+                // 首次点播 = 用户确认该片源与条目的对应关系，写入共用绑定表——
+                // 播完自动同步/续播/番库云端行从此生效（之后可在番库云端行"更换"）
+                if online.binding(for: match.seriesKey) == nil {
+                    online.bind(subject: onlineSearchSubject, to: match)
+                }
+                let playback = try await online.preparePlayback(show: match, episode: episode)
+                onlineMessage = nil
+                onPlayOnline?(playback)
+            } catch {
+                onlineMessage = "播放失败：\(error.localizedDescription)"
             }
         }
     }

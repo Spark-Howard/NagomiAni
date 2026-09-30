@@ -290,38 +290,41 @@ struct ContentView: View {
                 }
                 }
             )
-        case .bangumi:
-            BangumiPage(model: account) {
-                startUnifiedLogin(returnTo: .bangumi)
-            }
         case .chat:
             ChatPage(account: account, web: webChat)
         case .search:
-            SearchPage(model: search)
-        case .online:
-            OnlinePage(model: online) { target in
-                // 在线点播：切到播放器页并加载网络流（绑定/续播/自动标记看过走同一套链路）
-                selection = .player
-                Task {
-                    await model.load(
-                        url: target.url,
-                        librarySubjectID: target.boundSubjectID,
-                        librarySubject: target.boundSubject,
-                        displayTitle: target.displayTitle,
-                        resumeKey: target.resumeKey,
-                        mediaOverride: MediaOverride(
-                            episodeNumber: target.episodeNumber,
-                            seriesKey: target.seriesKey
-                        ),
-                        httpHeaders: target.httpHeaders,
-                        userAgent: target.userAgent,
-                        routes: target.routes,
-                        showTitle: target.showTitle
-                    )
-                }
+            // 搜索页 = 内容发现 + 在线观看入口（详情页「在线观看」区按需搜片源）；
+            // 「在线」独立模块已并入（2026-09-29 用户决策，减少一个模块）
+            SearchPage(model: search, online: online, onPlayOnline: { playOnline($0) })
+        case .bangumi:
+            BangumiPage(model: account, online: online, onPlayOnline: { playOnline($0) }) {
+                startUnifiedLogin(returnTo: .bangumi)
             }
         case .player:
             PlayerView(model: model)
+        }
+    }
+
+    /// 从搜索页/Bangumi 详情的「在线观看」点播云端剧集（番库云端行同链路）：
+    /// 切到播放器页并加载网络流（绑定/续播/自动标记看过走同一套链路）
+    private func playOnline(_ playback: OnlinePlayback) {
+        selection = .player
+        Task {
+            await model.load(
+                url: playback.url,
+                librarySubjectID: playback.boundSubjectID,
+                librarySubject: playback.boundSubject,
+                displayTitle: playback.displayTitle,
+                resumeKey: playback.resumeKey,
+                mediaOverride: MediaOverride(
+                    episodeNumber: playback.episodeNumber,
+                    seriesKey: playback.seriesKey
+                ),
+                httpHeaders: playback.httpHeaders,
+                userAgent: playback.userAgent,
+                routes: playback.routes,
+                showTitle: playback.showTitle
+            )
         }
     }
 
@@ -407,7 +410,6 @@ struct SidebarView: View {
 enum SidebarItem: String, CaseIterable, Identifiable {
     case player
     case library
-    case online
     case search
     case bangumi
     case chat
@@ -418,7 +420,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .player: return "播放器"
         case .library: return "番库"
-        case .online: return "在线"
         case .search: return "搜索"
         case .bangumi: return "Bangumi"
         case .chat: return "聊天"
@@ -429,7 +430,6 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .player: return "play.rectangle"
         case .library: return "books.vertical"
-        case .online: return "play.tv"
         case .search: return "magnifyingglass"
         case .bangumi: return "person.crop.circle"
         case .chat: return "message"

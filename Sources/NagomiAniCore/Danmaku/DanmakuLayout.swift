@@ -33,12 +33,15 @@ public enum DanmakuLayout {
     /// - Parameters:
     ///   - laneCount: 滚动车道数（由渲染层按画面高度计算）
     ///   - screenWidth: 画面逻辑宽（滚动位移基准）
-    ///   - fontSize: 默认字号（宽度估算）
+    ///   - fontSize: 默认字号（宽度估算的兜底）
+    ///   - measure: 可选的真实文本测宽（渲染层用字体度量注入；
+    ///     估算宽度对 emoji/宽字母偏差大，实测能让车道防重叠数学与实际绘制一致）
     public static func assignLanes(
         comments: [DanmakuComment],
         laneCount: Int,
         screenWidth: CGFloat,
-        fontSize: CGFloat = 24
+        fontSize: CGFloat = 24,
+        measure: ((String) -> CGFloat)? = nil
     ) -> [DanmakuTrackItem] {
         let lanes = max(laneCount, 1)
         let sorted = comments.sorted { $0.time < $1.time }
@@ -54,7 +57,8 @@ public enum DanmakuLayout {
 
         var items: [DanmakuTrackItem] = []
         for comment in sorted {
-            let width = estimateWidth(text: comment.text, fontSize: fontSize)
+            let width = measure?(comment.text)
+                ?? estimateWidth(text: comment.text, fontSize: fontSize)
             switch comment.mode {
             case .scroll:
                 let lane = pickScrollLane(

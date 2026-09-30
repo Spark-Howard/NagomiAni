@@ -63,13 +63,28 @@ final class DanmakuController: ObservableObject {
     private static let cacheLimit = 10
 
     func credentials() -> DanmakuCredentials {
-        DanmakuCredentials(
+        // 优先级：UserDefaults 显式配置（高级用户/开发机逃生口）→ 应用内置（打包版注入）
+        let stored = DanmakuCredentials(
             appId: UserDefaults.standard.string(forKey: Self.appIdKey) ?? "",
             appSecret: UserDefaults.standard.string(forKey: Self.appSecretKey) ?? ""
         )
+        if stored.isConfigured { return stored }
+        return DanmakuEmbeddedCredentials.load() ?? DanmakuCredentials(appId: "", appSecret: "")
     }
 
     var isConfigured: Bool { credentials().isConfigured }
+
+    /// 当前状态的人类可读描述（控制条菜单与设置面板共用）
+    var statusDescription: String {
+        switch phase {
+        case .idle: return "未加载弹幕"
+        case .unconfigured: return "弹幕服务未就绪"
+        case .matching: return "正在匹配剧集…"
+        case .loading: return "正在拉取弹幕…"
+        case .loaded(let count): return "已加载 \(count) 条弹幕"
+        case .failed(let message): return "失败：\(message)"
+        }
+    }
 
     /// 换集/首次加载成功后调用（同步、立即返回；拉取在内部 Task 进行）。
     /// 内部判断开关、凭据、同集去重。
@@ -103,14 +118,6 @@ final class DanmakuController: ObservableObject {
     /// 手动重新获取当前集弹幕（忽略内存缓存；清 currentKey 绕过同集 guard，否则 prepare 会直接返回）
     func refetch() {
         guard let context = currentContext else { return }
-        commentsCache.removeValue(forKey: context.key)
-        currentKey = nil
-        prepare(context)
-    }
-
-    /// 设置保存后调用：用新凭据重新拉取当前集（清 currentKey 绕过同集 guard）
-    func refreshConfiguration() {
-        guard let context = currentContext, isEnabled else { return }
         commentsCache.removeValue(forKey: context.key)
         currentKey = nil
         prepare(context)

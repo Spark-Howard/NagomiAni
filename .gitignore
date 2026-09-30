@@ -46,6 +46,9 @@ DerivedData/
 # 若以后有本地私密配置可放这里，如：
 # config.local.plist
 
+# 弹弹play 凭据（pack.sh 打包时混淆注入 App bundle；两行：AppId / AppSecret）
+DanmakuCredentials.private
+
 # ===== 内部文档（个人开发笔记，不入库）=====
 CONVERSATION-ARCHIVE-*.md
 CONTEXT.md

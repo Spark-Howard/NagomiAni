@@ -90,6 +90,24 @@ cp Vendor/libmpv/*.dylib "$STAGE/${APP_NAME}.app/Contents/Frameworks/"
 install_name_tool -add_rpath "@executable_path/../Frameworks" \
     "$STAGE/${APP_NAME}.app/Contents/MacOS/${APP_NAME}" 2>/dev/null || true
 
+# 内置弹幕凭据（弹弹play）：从本地 gitignored 的 DanmakuCredentials.private
+# （两行：AppId / AppSecret）读取，XOR 0x5A 混淆后写入 bundle Resources。
+# ⚠️ 真实值永不进仓库（项目开源）；混淆防普通查看，非加密——泄露则重置密钥重打包。
+# 本地没有该文件时跳过：应用回退 UserDefaults，无凭据则弹幕显示"未就绪"。
+if [ -f "DanmakuCredentials.private" ]; then
+python3 - "$STAGE/${APP_NAME}.app/Contents/Resources" <<'PYEOF'
+import sys, os
+out_dir = sys.argv[1]
+with open("DanmakuCredentials.private", encoding="utf-8") as f:
+    lines = [line.strip() for line in f if line.strip()]
+assert len(lines) >= 2, "DanmakuCredentials.private 需要 AppId / AppSecret 两行"
+payload = (lines[0] + "\n" + lines[1]).encode("utf-8")
+with open(os.path.join(out_dir, "danmaku-credentials.bin"), "wb") as f:
+    f.write(bytes(b ^ 0x5A for b in payload))
+PYEOF
+echo "  弹幕凭据已内置（混淆写入 bundle）"
+fi
+
 echo "▸ 3/5 签名（测试版 ad-hoc 签名）"
 codesign --force --deep --sign - \
     "$STAGE/${APP_NAME}.app"

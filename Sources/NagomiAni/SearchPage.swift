@@ -458,24 +458,51 @@ struct SubjectDetailView: View {
     private var onlineSection: some View {
         if let online {
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    Image(systemName: "play.tv")
-                        .foregroundStyle(NagomiTheme.accent)
-                    Text("在线观看")
-                        .font(.headline)
-                    Text("从片源站搜索本作资源，可在线播放或缓存到本地")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer()
-                    Button(showOnlineSection ? "收起" : "搜索片源") {
-                        showOnlineSection.toggle()
-                        if showOnlineSection {
-                            Task { await online.searchSources(for: onlineSearchSubject) }
-                        }
+                // 整块大卡片即开关：樱粉底 + 描边 + 大图标，是详情页里最醒目的入口
+                Button {
+                    showOnlineSection.toggle()
+                    if showOnlineSection {
+                        Task { await online.searchSources(for: onlineSearchSubject) }
                     }
-                    .buttonStyle(NagomiSecondaryButtonStyle())
+                } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: "play.tv")
+                            .font(.system(size: 21, weight: .medium))
+                            .foregroundStyle(NagomiTheme.accent)
+                            .frame(width: 44, height: 44)
+                            .background(NagomiTheme.accentSoft, in: RoundedRectangle(cornerRadius: 10))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("在线观看")
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text(showOnlineSection
+                                 ? "正在展示各片源站的资源，点开选择分集播放或缓存"
+                                 : "从片源站搜索本作资源，可在线播放或缓存到本地")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        Text(showOnlineSection ? "收起" : "搜索片源")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(NagomiTheme.accent)
+                        Image(systemName: "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(NagomiTheme.accent)
+                            .rotationEffect(.degrees(showOnlineSection ? 0 : -90))
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .background(NagomiTheme.accentSoft, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(NagomiTheme.accent.opacity(0.35), lineWidth: 1)
+                )
+                .nagomiHoverHighlight(NagomiTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+
                 if showOnlineSection {
                     onlineSourceList(online)
                 }

@@ -138,8 +138,46 @@ if [ ! -d "$MOUNT" ]; then
 fi
 echo "  挂载于: $MOUNT"
 
-# 3) 用 Python 直接生成 .DS_Store（背景图 + 图标位置，不依赖 Finder/自动化）
-python3 make_dsstore.py "$MOUNT" || echo "  ⚠ .DS_Store 生成失败"
+# 3) 引导界面：优先 Finder AppleScript（图形会话里 Finder 亲自写 .DS_Store，
+#    箭头/背景必然显示——历史验证的唯一可靠路径）；无 GUI（SSH/CI/沙箱）时
+#    AppleScript 直接报错，自动回退 make_dsstore.py（布局数据仍在，箭头可能不显示，
+#    见 CONTEXT §5.5 教训）。NO_GUI=1 可强制回退。
+LAYOUT_VIA="python"
+if [ -z "${NO_GUI:-}" ] && osascript -e 'tell application "Finder" to get name' >/dev/null 2>&1; then
+    echo "  检测到图形会话：用 Finder 设置引导界面（箭头可靠显示）"
+    open "$MOUNT"
+    sleep 1
+    if osascript <<'APPLESCRIPT'
+tell application "Finder"
+    tell disk "NagomiAni"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set the bounds of container window to {100, 100, 740, 500}
+        set viewOptions to the icon view options of container window
+        set arrangement of viewOptions to not arranged
+        set icon size of viewOptions to 96
+        set background picture of viewOptions to file ".background:dmg_bg.png"
+        set position of item "NagomiAni.app" of container window to {200, 180}
+        set position of item "Applications" of container window to {480, 180}
+        update without registering applications
+        delay 1
+    end tell
+end tell
+APPLESCRIPT
+    then
+        LAYOUT_VIA="finder"
+        sleep 1
+    else
+        echo "  ⚠ AppleScript 失败，回退 Python 方案"
+    fi
+else
+    echo "  无图形会话（或 NO_GUI=1）：回退 make_dsstore.py（箭头可能不显示）"
+fi
+if [ "$LAYOUT_VIA" = "python" ]; then
+    python3 make_dsstore.py "$MOUNT" || echo "  ⚠ .DS_Store 生成失败"
+fi
 
 hdiutil detach "$MOUNT" >/dev/null 2>&1
 hdiutil convert "$RW" -format UDZO -o "$DIST/$DMG_NAME" >/dev/null 2>&1
@@ -149,4 +187,9 @@ echo "▸ 5/5 完成"
 echo "──────────────────────────────────────"
 echo "  ✔ $DIST/$DMG_NAME"
 echo "  ✔ 版本 ${VERSION}（build ${BUILD}）· ad-hoc 签名（仅本机测试，对外分发需 Developer ID + 公证）"
+if [ "$LAYOUT_VIA" = "finder" ]; then
+    echo "  ✔ 引导界面：Finder 写入（双击 dmg 即见 箭头+背景 拖拽安装）"
+else
+    echo "  ⚠ 引导界面：Python 回退路径（箭头可能不显示；请在图形界面终端重跑，或 ./interactive_dmg.sh ${VERSION} 修复）"
+fi
 echo "──────────────────────────────────────"

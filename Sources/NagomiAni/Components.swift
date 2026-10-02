@@ -124,3 +124,78 @@ struct NagomiSectionHeader: View {
         .padding(.top, 6)
     }
 }
+
+// MARK: - 无焦点环文本框
+
+/// 永不绘制系统焦点环的文本框（NSViewRepresentable 直辖 NSTextField）。
+///
+/// 为什么存在：macOS 的 SwiftUI `TextField` 底层是 NSTextField，聚焦时画的是
+/// **窗口独立覆盖层上的系统焦点环**——`.focusEffectDisabled()` 管不到它，
+/// `FocusRingType` 事后批量清理也依赖时机，聚焦瞬间的环仍可能残留（且切页后
+/// 环跟着窗口留在背景）。此控件把 `focusRingType` 硬编码为 `.none`（子类覆写，
+/// 外部设不回默认值），从根上杜绝；外观为恒定自绘圆角边框，不随聚焦变化。
+/// 回车触发 `onSubmit`，输入实时同步 `text`。
+extension View {
+    /// 樱粉圆角输入框外观（配 RinglessTextField 使用）：恒定描边，聚焦态不产生
+    /// 任何额外视觉（系统蓝色聚焦环已由 RinglessTextField 根除）
+    func nagomiFieldChrome() -> some View {
+        self
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 7))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(NagomiTheme.accent.opacity(0.3), lineWidth: 1)
+            )
+    }
+}
+
+struct RinglessTextField: NSViewRepresentable {
+    @Binding var text: String
+    var placeholder: String
+    var onSubmit: () -> Void
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = RinglessField()
+        field.placeholderString = placeholder
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit)
+        field.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        // 只在 differs 时回写，避免外部状态刷新把光标顶到末尾
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        field.placeholderString = placeholder
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: RinglessTextField
+        init(_ parent: RinglessTextField) { self.parent = parent }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let field = obj.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        @objc func submit() {
+            parent.onSubmit()
+        }
+    }
+
+    /// focusRingType 覆写为常量 .none——任何外部设置都归零（set 走 super 直写）
+    final class RinglessField: NSTextField {
+        override var focusRingType: NSFocusRingType {
+            get { .none }
+            set { super.focusRingType = .none }
+        }
+    }
+}

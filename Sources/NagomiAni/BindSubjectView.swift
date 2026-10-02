@@ -23,9 +23,10 @@ struct BindSubjectView: View {
             }
 
             HStack {
-                TextField("输入动画名称搜索（如：命运石之门）", text: $keyword)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { search() }
+                RinglessTextField(text: $keyword,
+                                  placeholder: "输入动画名称搜索（如：命运石之门）",
+                                  onSubmit: { search() })
+                    .nagomiFieldChrome()
                 Button("搜索") { search() }
                     .disabled(keyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearching)
             }

@@ -47,9 +47,19 @@ struct SearchPage: View {
     private var searchListView: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                TextField("搜索 Bangumi 条目（动画名 / 原名）", text: $model.keyword)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { model.search() }
+                // 自定义无焦点环文本框：系统 NSTextField 的蓝色聚焦环画在窗口覆盖层，
+                // 会跨界面残留（focusEffectDisabled/批量清理都压不住聚焦瞬间）——
+                // 外观恒定自绘（聚焦反馈 = 樱粉描边加深，跟随视图本身，永不残留）
+                RinglessTextField(text: $model.keyword,
+                                  placeholder: "搜索 Bangumi 条目（动画名 / 原名）",
+                                  onSubmit: { model.search() })
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(NagomiTheme.accent.opacity(0.3), lineWidth: 1)
+                    )
                 Button {
                     model.search()
                 } label: {

@@ -700,9 +700,10 @@ struct LibraryBindSheet: View {
 
             // 手动搜索
             HStack {
-                TextField("搜索其它条目", text: $keyword)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { search() }
+                RinglessTextField(text: $keyword,
+                                  placeholder: "搜索其它条目",
+                                  onSubmit: { search() })
+                    .nagomiFieldChrome()
                 Button("搜索") { search() }
                     .disabled(keyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearching)
             }

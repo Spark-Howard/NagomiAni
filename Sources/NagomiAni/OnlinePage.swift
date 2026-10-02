@@ -78,9 +78,10 @@ struct OnlineSourceSheet: View {
                 .font(.headline)
 
             HStack {
-                TextField("https://example.com（站点地址或 API 地址）", text: $urlText)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { add() }
+                RinglessTextField(text: $urlText,
+                                  placeholder: "https://example.com（站点地址或 API 地址）",
+                                  onSubmit: { add() })
+                    .nagomiFieldChrome()
                 Button("添加") { add() }
                     .buttonStyle(NagomiPrimaryButtonStyle())
                     .disabled(urlText.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -228,9 +229,10 @@ struct OnlineBindSheet: View {
 
             // 手动搜索
             HStack {
-                TextField("搜索其它条目", text: $keyword)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { search() }
+                RinglessTextField(text: $keyword,
+                                  placeholder: "搜索其它条目",
+                                  onSubmit: { search() })
+                    .nagomiFieldChrome()
                 Button("搜索") { search() }
                     .buttonStyle(NagomiPrimaryButtonStyle())
                     .disabled(keyword.trimmingCharacters(in: .whitespaces).isEmpty || model.isSearching)

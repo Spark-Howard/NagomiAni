@@ -718,9 +718,10 @@ struct ChatPage: View {
             }
 
             HStack(spacing: 6) {
-                TextField("用户名（非昵称）…", text: $newUsername)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { add() }
+                RinglessTextField(text: $newUsername,
+                                  placeholder: "用户名（非昵称）…",
+                                  onSubmit: { add() })
+                    .nagomiFieldChrome()
                 Button {
                     add()
                 } label: {

@@ -120,8 +120,18 @@ private final class DanmakuSpriteCache {
     }
 
     private func makeSprite(text: String, color: UInt32, fontSize: CGFloat, scale: CGFloat) -> Sprite {
+        // ⚠️ 颜色必须用 kCTForegroundColorAttributeName（CGColor）：
+        // 走 NSFont 桥接绘制时 CGContext.setFillColor 会被忽略（AppKit 默认黑），
+        // 曾导致所有弹幕黑字、任何颜色设置都不生效（离线脚本已验证像素级正确）
+        let cgColor = NSColor(
+            red: CGFloat((color >> 16) & 0xFF) / 255,
+            green: CGFloat((color >> 8) & 0xFF) / 255,
+            blue: CGFloat(color & 0xFF) / 255,
+            alpha: 1
+        ).cgColor
         let line = NSAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: fontSize, weight: .medium),
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): cgColor,
         ])
         let ctLine = CTLineCreateWithAttributedString(line)
         var ascent: CGFloat = 0, descent: CGFloat = 0
@@ -142,12 +152,6 @@ private final class DanmakuSpriteCache {
         // 保持 CG 原生 y-up（CoreText 在此约定下字形天然正立，无翻转歧义），
         // 仅把像素坐标缩放回逻辑 pt；baseline 抬高 descent 防下伸部（g/y/p）被裁
         cg.scaleBy(x: scale, y: scale)
-        cg.setFillColor(NSColor(
-            red: CGFloat((color >> 16) & 0xFF) / 255,
-            green: CGFloat((color >> 8) & 0xFF) / 255,
-            blue: CGFloat(color & 0xFF) / 255,
-            alpha: 1
-        ).cgColor)
         cg.textPosition = CGPoint(x: 0, y: descent)
         CTLineDraw(ctLine, cg)
         NSGraphicsContext.restoreGraphicsState()
@@ -189,6 +193,7 @@ final class DanmakuHostView: NSView {
         }
         if fontSize != controller.fontSize {
             fontSize = controller.fontSize
+            spriteCache.clear() // 精灵 key 不含字号：不清则旧字号位图被复用（大小不变）
             needsRebuild = true
         }
         if colorMode != controller.colorMode || customColor != controller.customColor {

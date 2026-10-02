@@ -74,6 +74,38 @@ final class DanmakuController: ObservableObject {
 
     var isConfigured: Bool { credentials().isConfigured }
 
+    // MARK: - 显示设置（弹幕设置面板；UserDefaults 持久化，改动即时生效）
+
+    /// 弹幕颜色模式：跟随弹幕自带颜色 / 全部纯白 / 统一自定义色
+    enum DanmakuColorMode: String, CaseIterable, Identifiable {
+        case original, white, custom
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .original: return "跟随弹幕颜色"
+            case .white: return "全部纯白"
+            case .custom: return "自定义颜色"
+            }
+        }
+    }
+
+    @Published var fontSize: CGFloat =
+        { let v = UserDefaults.standard.double(forKey: "danmaku.fontSize"); return v > 0 ? CGFloat(v) : 22 }()
+    { didSet { UserDefaults.standard.set(Double(fontSize), forKey: "danmaku.fontSize") } }
+
+    @Published var colorMode: DanmakuColorMode =
+        DanmakuColorMode(rawValue: UserDefaults.standard.string(forKey: "danmaku.colorMode") ?? "") ?? .original
+    { didSet { UserDefaults.standard.set(colorMode.rawValue, forKey: "danmaku.colorMode") } }
+
+    /// 自定义颜色（0xRRGGBB）
+    @Published var customColor: UInt32 =
+        { let v = UserDefaults.standard.integer(forKey: "danmaku.customColor"); return v > 0 ? UInt32(v) : 0xEC6A88 }()
+    { didSet { UserDefaults.standard.set(Int(customColor), forKey: "danmaku.customColor") } }
+
+    @Published var opacity: Double =
+        { let v = UserDefaults.standard.double(forKey: "danmaku.opacity"); return v > 0 ? v : 1.0 }()
+    { didSet { UserDefaults.standard.set(opacity, forKey: "danmaku.opacity") } }
+
     /// 当前状态的人类可读描述（控制条菜单与设置面板共用）
     var statusDescription: String {
         switch phase {

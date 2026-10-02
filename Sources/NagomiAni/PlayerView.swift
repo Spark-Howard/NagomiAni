@@ -28,7 +28,7 @@ struct PlayerView: View {
                     controller: model.danmaku,
                     currentTime: { model.engine.currentTime },
                     isPlaying: model.state == .playing,
-                    rate: model.engine.rate
+                    seekRevision: model.danmaku.seekRevision
                 )
                 .allowsHitTesting(false)
                 GeometryReader { geo in

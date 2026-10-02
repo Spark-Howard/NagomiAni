@@ -197,6 +197,7 @@ final class PlayerModel: ObservableObject {
         // 弹幕在 load 一开始就切换：换集/加载失败时旧弹幕立即清掉，
         // 不会把上一集的弹幕残留在加载中的画面上（同集重载由同集 guard 保留）
         danmaku.prepare(danmakuContext)
+        danmaku.markSeeked() // 续播起点≠0 时弹幕动画按新时间线重摆
         let resumeAt = resumeStore.entry(forPath: resumePath)
             .flatMap { ResumePolicy.resumePosition(position: $0.position, duration: $0.duration) }
         pendingResume = (path: resumePath, position: resumeAt ?? 0, duration: 0)
@@ -299,6 +300,7 @@ final class PlayerModel: ObservableObject {
         lastSeekTime = Date()
         // 用户手动跳转即放弃"等引擎到达续播点"的落盘闸门
         pendingResumeTarget = nil
+        danmaku.markSeeked() // 弹幕动画时间线重摆（显式通知，与 time-pos 事件频率解耦）
         engine.seek(to: seconds, completion: nil)
     }
 

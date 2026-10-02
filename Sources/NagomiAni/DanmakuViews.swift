@@ -20,17 +20,17 @@ import NagomiAniCore
 /// 不参与命中测试：控制条/顶栏在其上层正常交互。
 struct DanmakuOverlayView: View {
     @ObservedObject var controller: DanmakuController
-    /// 引擎当前播放时间（seek 跳变检测用）
+    /// 引擎当前播放时间（诊断用；弹幕动画由 Core Animation 自驱，不依赖它逐帧更新）
     let currentTime: () -> Double
     /// 是否正在播放（暂停 = 冻结全部动画）
     let isPlaying: Bool
-    /// 播放倍速（弹幕时间随视频倍速缩放）
-    let rate: Float
+    /// seek 重摆信号（用户拖进度/换集时递增）
+    let seekRevision: Int
 
     var body: some View {
         DanmakuLayerRepresentable(
             controller: controller, currentTime: currentTime,
-            isPlaying: isPlaying, rate: rate
+            isPlaying: isPlaying, seekRevision: seekRevision
         )
         .allowsHitTesting(false)
     }
@@ -40,21 +40,19 @@ private struct DanmakuLayerRepresentable: NSViewRepresentable {
     @ObservedObject var controller: DanmakuController
     let currentTime: () -> Double
     let isPlaying: Bool
-    let rate: Float
+    let seekRevision: Int
 
     func makeNSView(context: Context) -> DanmakuHostView {
         let host = DanmakuHostView()
         host.wantsLayer = true
         // 子图层默认不裁剪（弹幕起点在画面外会被画到视频区域外）——必须显式裁剪
         host.layer?.masksToBounds = true
-        host.syncFrom(controller: controller, currentTime: currentTime,
-                      isPlaying: isPlaying, rate: rate)
+        host.syncFrom(controller: controller, seekRevision: seekRevision, isPlaying: isPlaying)
         return host
     }
 
     func updateNSView(_ host: DanmakuHostView, context: Context) {
-        host.syncFrom(controller: controller, currentTime: currentTime,
-                      isPlaying: isPlaying, rate: rate)
+        host.syncFrom(controller: controller, seekRevision: seekRevision, isPlaying: isPlaying)
     }
 }
 
@@ -67,8 +65,7 @@ final class DanmakuHostView: NSView {
     private var customColor: UInt32 = 0xFFFFFF
     private var opacity: Float = 1
     private var isPlaying = false
-    private var rate: Float = 1
-    private var lastEngineTime: Double = -1
+    private var seekRevision = 0
     var timeProvider: (() -> Double)?
 
     private var items: [DanmakuTrackItem] = []
@@ -82,9 +79,8 @@ final class DanmakuHostView: NSView {
     override var isFlipped: Bool { true } // 顶部原点 y 向下，与车道公式一致
 
     /// 从控制器同步（Representable 每次刷新调用；显式 diff，值不变零开销）
-    func syncFrom(controller: DanmakuController, currentTime: @escaping () -> Double,
-                  isPlaying playing: Bool, rate newRate: Float) {
-        timeProvider = currentTime
+    func syncFrom(controller: DanmakuController, seekRevision newSeekRevision: Int,
+                  isPlaying playing: Bool) {
         var needsRelayout = false
         if comments != controller.comments {
             comments = controller.comments
@@ -100,25 +96,26 @@ final class DanmakuHostView: NSView {
             spriteCache.clear() // 颜色口径变了：精灵全部重渲染
             needsRelayout = true
         }
-        let engineTime = timeProvider?() ?? 0
         let playingChanged = isPlaying != playing
-        let rateChanged = abs(rate - newRate) > 0.01
         isPlaying = playing
-        rate = newRate
-        // seek 跳变（暂停拖动/点击进度/换集）→ 重摆全部动画时间线
-        if timeSync.didSeek(to: engineTime) { needsRelayout = true }
-        // 暂停/恢复/倍速：只切 layer.speed（动画时间线自动缩放/冻结，呈现连续不跳）
-        if playingChanged || rateChanged || needsRelayout {
+        // seek 重摆：显式信号（PlayerModel.seek/load → markSeeked），
+        // 与引擎 time-pos 事件频率彻底解耦（低频事件曾致每秒误触发全量重摆）
+        if seekRevision != newSeekRevision {
+            seekRevision = newSeekRevision
+            needsRelayout = true
+        }
+        // 暂停/恢复：只切 layer.speed（动画时间线冻结/恢复，呈现连续不跳）
+        if playingChanged || needsRelayout {
             applySpeedAndLayout(needsRelayout: needsRelayout)
         }
     }
 
     private var timeSync = DanmakuTimeSync()
 
-    /// host layer speed：0 = 冻结全部动画（暂停），rate = 倍速跟随视频
+    /// host layer speed：0 = 冻结全部动画（暂停），1 = 正常播放
     private func applySpeedAndLayout(needsRelayout: Bool) {
         guard let container = layer else { return }
-        container.speed = isPlaying ? rate : 0
+        container.speed = isPlaying ? 1 : 0
         if needsRelayout { relayout() }
     }
 
@@ -151,7 +148,7 @@ final class DanmakuHostView: NSView {
         )
 
         guard let container = layer else { return }
-        container.speed = isPlaying ? rate : 0
+        container.speed = isPlaying ? 1 : 0
         // layer 本地时间（已计入 speed/paused）：暂停时冻结，恢复后动画按相对时刻起跑
         let localNow = container.convertTime(CACurrentMediaTime(), from: nil)
         let engineNow = timeProvider?() ?? 0
@@ -184,8 +181,8 @@ final class DanmakuHostView: NSView {
             }
 
             // 出现/滚动/隐没的时间线（layer 本地时钟；暂停时冻结，恢复不迟到）
-            let beginTime = localNow + max(0, -elapsed) / Double(max(rate, 0.01))
-            let animDuration = duration / Double(max(rate, 0.01))
+            let beginTime = localNow + max(0, -elapsed)
+            let animDuration = duration
 
             let opacityAnim = CABasicAnimation(keyPath: "opacity")
             opacityAnim.fromValue = Float(1)
@@ -349,16 +346,36 @@ private final class DanmakuSpriteCache {
     }
 }
 
-/// 控制条弹幕菜单：显示开关 / 状态 / 重新获取 / 设置
+/// 控制条弹幕菜单：显示开关 / 显示设置（字号/颜色/不透明度一级直达）/ 状态 / 重新获取。
+/// 用户要求设置项放一级菜单（不走二级 sheet）；颜色选"自定义"时菜单内直接出取色器。
+/// 凭据已内置（弹弹play），无凭据输入项（见 DanmakuEmbeddedCredentials）。
 struct DanmakuMenu: View {
     @ObservedObject var controller: DanmakuController
-    @State private var showSettings = false
 
     var body: some View {
         Menu {
             Toggle("弹幕显示", isOn: $controller.isEnabled)
             Divider()
-            Text(statusText)
+            Picker("字号", selection: $controller.fontSize) {
+                Text("小（18）").tag(CGFloat(18))
+                Text("标准（22）").tag(CGFloat(22))
+                Text("大（28）").tag(CGFloat(28))
+            }
+            Picker("颜色", selection: $controller.colorMode) {
+                ForEach(DanmakuController.DanmakuColorMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            if controller.colorMode == .custom {
+                ColorPicker("自定义颜色", selection: customColorBinding)
+            }
+            Picker("不透明度", selection: $controller.opacity) {
+                Text("30%").tag(Double(0.3))
+                Text("60%").tag(Double(0.6))
+                Text("100%").tag(Double(1.0))
+            }
+            Divider()
+            Text(controller.statusDescription)
                 .foregroundStyle(.secondary)
             Button {
                 controller.refetch()
@@ -366,12 +383,6 @@ struct DanmakuMenu: View {
                 Label("重新获取弹幕", systemImage: "arrow.clockwise")
             }
             .disabled(!controller.isEnabled || !controller.isConfigured)
-            Divider()
-            Button {
-                showSettings = true
-            } label: {
-                Label("弹幕设置…", systemImage: "gearshape")
-            }
         } label: {
             Image(systemName: controller.isEnabled
                   ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
@@ -383,94 +394,6 @@ struct DanmakuMenu: View {
         .fixedSize()
         .nagomiHoverHighlight(Color.white.opacity(0.14), in: Circle())
         .help(controller.isEnabled ? "弹幕：开" : "弹幕：关")
-        .sheet(isPresented: $showSettings) {
-            DanmakuSettingsSheet(controller: controller)
-        }
-    }
-
-    private var statusText: String {
-        controller.statusDescription
-    }
-}
-
-/// 弹幕设置面板：显示设置（字号/颜色/不透明度，即时生效）+ 服务状态。
-/// 凭据已内置（弹弹play），用户无需也看不到任何凭据内容——旧版的
-/// AppId/AppSecret/服务器地址输入框已随凭据内置化移除（高级用户可用
-/// `defaults write` 覆盖，见 DanmakuEmbeddedCredentials 注释）。
-struct DanmakuSettingsSheet: View {
-    @ObservedObject var controller: DanmakuController
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("弹幕设置")
-                .font(.headline)
-
-            // MARK: 显示设置
-
-            HStack(spacing: 10) {
-                Text("字号").frame(width: 52, alignment: .leading)
-                Slider(value: $controller.fontSize, in: 16...32, step: 2)
-                Text("\(Int(controller.fontSize)) pt")
-                    .font(.callout.monospacedDigit())
-                    .frame(width: 46, alignment: .trailing)
-            }
-
-            HStack(spacing: 10) {
-                Text("颜色").frame(width: 52, alignment: .leading)
-                Picker("颜色", selection: $controller.colorMode) {
-                    ForEach(DanmakuController.DanmakuColorMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                }
-                .labelsHidden()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                if controller.colorMode == .custom {
-                    ColorPicker("", selection: customColorBinding)
-                        .labelsHidden()
-                        .fixedSize()
-                }
-            }
-
-            HStack(spacing: 10) {
-                Text("不透明度").frame(width: 52, alignment: .leading)
-                Slider(value: $controller.opacity, in: 0.3...1.0)
-                Text("\(Int(controller.opacity * 100))%")
-                    .font(.callout.monospacedDigit())
-                    .frame(width: 46, alignment: .trailing)
-            }
-
-            Divider()
-
-            // MARK: 服务状态
-
-            Label("弹幕服务已内置（弹弹play），无需配置", systemImage: "checkmark.seal.fill")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(NagomiTheme.accent)
-
-            HStack(spacing: 6) {
-                Text("当前状态")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(controller.statusDescription)
-                    .font(.caption.weight(.medium))
-            }
-
-            Text("在线番按剧名 + 集号自动匹配，本地番按文件指纹匹配，找不到匹配的集不显示弹幕（宁缺毋滥）。弹幕以悬浮层渲染，与字幕同时显示互不影响。")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer()
-
-            HStack {
-                Spacer()
-                Button("好") { dismiss() }
-                    .buttonStyle(NagomiPrimaryButtonStyle())
-            }
-        }
-        .padding(16)
-        .frame(width: 440, height: 340)
     }
 
     /// UInt32 (0xRRGGBB) ↔ SwiftUI Color
@@ -485,16 +408,10 @@ struct DanmakuSettingsSheet: View {
                 )
             },
             set: { color in
-                #if canImport(AppKit)
                 let ns = NSColor(color).usingColorSpace(.sRGB)
                 let r = UInt32(round((ns?.redComponent ?? 0) * 255))
                 let g = UInt32(round((ns?.greenComponent ?? 0) * 255))
                 let b = UInt32(round((ns?.blueComponent ?? 0) * 255))
-                #else
-                let r = UInt32(round(color.components.r * 255))
-                let g = UInt32(round(color.components.g * 255))
-                let b = UInt32(round(color.components.b * 255))
-                #endif
                 controller.customColor = (r << 16) | (g << 8) | b
             }
         )

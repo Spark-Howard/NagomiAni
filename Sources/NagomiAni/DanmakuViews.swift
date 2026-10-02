@@ -2,29 +2,37 @@ import CoreText
 import SwiftUI
 import NagomiAniCore
 
-/// 弹幕覆盖层：**Core Animation 图层渲染**（第三轮重构）。
+/// 弹幕覆盖层：**Core Animation 原生动画驱动**（第四轮，终局方案）。
 ///
-/// 帧率问题的演进：
-/// ① 原版 Canvas 逐帧 Text 排版——字体度量/布局是每帧大头，掉帧；
-/// ② 位图精灵 + Canvas——Canvas 是 CPU 光栅化，每帧重画整块视频区域位图，仍卡；
-/// ③ 现在：每条弹幕一个预渲染 CALayer，`CADisplayLink` 每帧只更新位置（赋值坐标），
-///    合成全部在 GPU——帧率 = 屏幕刷新率（60/120Hz），CPU 每帧开销趋近于零。
-/// 暂停冻结 = displayLink 暂停；拖动/seek = 时间锚点重置后下一帧重排（语义与纯函数一致）。
+/// 帧率问题演进：
+/// ① Canvas 逐帧 Text 排版（字体度量掉帧）→ ② 位图精灵 + Canvas（Canvas 是 CPU
+/// 光栅化，每帧重画整块区域位图，仍卡）→ ③ CALayer + TimelineView tick 逐帧赋值
+/// （SwiftUI 调度抖动使 tick 不稳，仍卡）→ ④ 现在：每条弹幕 layer 挂 `CABasicAnimation`，
+/// **插值与合成全部由 Core Animation 在 GPU 完成，CPU 逐帧开销为零**，无任何 tick 驱动。
+///
+/// 关键机制：
+/// - 可见性 = "model 位置在画面外 + `masksToBounds` 裁剪"天然保证（动画未开始/已结束
+///   时 layer 回到 model 值即画面外），opacity 动画负责出现/隐没；
+/// - 暂停/恢复/倍速 = 宿主 `layer.speed`（0 = 全部动画冻结，含未来动画的 beginTime）；
+/// - seek = 引擎时间跳变检测 → 全量重摆（用 layer 本地时钟算未来动画 beginTime，
+///   暂停期间 seek 也不迟到）；
+/// - 滚动弹幕匀速（linear timing），与同步阈值/连播窗口无耦合。
 /// 不参与命中测试：控制条/顶栏在其上层正常交互。
 struct DanmakuOverlayView: View {
     @ObservedObject var controller: DanmakuController
-    /// 每帧读取的当前播放时间（引擎 time-pos，事件级更新）
+    /// 引擎当前播放时间（seek 跳变检测用）
     let currentTime: () -> Double
-    /// 是否正在播放（暂停时冻结弹幕）
+    /// 是否正在播放（暂停 = 冻结全部动画）
     let isPlaying: Bool
+    /// 播放倍速（弹幕时间随视频倍速缩放）
+    let rate: Float
 
     var body: some View {
-        // TimelineView 仅作 vsync 对齐的逐帧驱动器（每 tick 极轻）：
-        // 图层位置更新在 updateNSView → host.step()，合成在 GPU
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isPlaying)) { _ in
-            DanmakuLayerRepresentable(controller: controller, currentTime: currentTime, isPlaying: isPlaying)
-                .allowsHitTesting(false)
-        }
+        DanmakuLayerRepresentable(
+            controller: controller, currentTime: currentTime,
+            isPlaying: isPlaying, rate: rate
+        )
+        .allowsHitTesting(false)
     }
 }
 
@@ -32,36 +40,228 @@ private struct DanmakuLayerRepresentable: NSViewRepresentable {
     @ObservedObject var controller: DanmakuController
     let currentTime: () -> Double
     let isPlaying: Bool
+    let rate: Float
 
     func makeNSView(context: Context) -> DanmakuHostView {
         let host = DanmakuHostView()
         host.wantsLayer = true
-        host.syncFrom(controller: controller, currentTime: currentTime, isPlaying: isPlaying)
-        host.step()
+        // 子图层默认不裁剪（弹幕起点在画面外会被画到视频区域外）——必须显式裁剪
+        host.layer?.masksToBounds = true
+        host.syncFrom(controller: controller, currentTime: currentTime,
+                      isPlaying: isPlaying, rate: rate)
         return host
     }
 
     func updateNSView(_ host: DanmakuHostView, context: Context) {
-        host.syncFrom(controller: controller, currentTime: currentTime, isPlaying: isPlaying)
-        host.step() // TimelineView 每 tick 驱动一次图层位置更新
+        host.syncFrom(controller: controller, currentTime: currentTime,
+                      isPlaying: isPlaying, rate: rate)
     }
 }
 
-/// 引擎时间 → 渲染时间插值：time-pos 属性事件约 30Hz，直接驱动逐帧渲染会出现
-/// 台阶感。以最近一次引擎时间为锚点，用墙钟补齐帧间增量；锚点随每次事件刷新，
-/// 插值误差不会跨事件累积（≤ 一个事件间隔 × 倍速偏差，可忽略）。
+/// 弹幕宿主视图：CALayer 池 + Core Animation 原生动画（无逐帧 CPU 工作）。
+@MainActor
+final class DanmakuHostView: NSView {
+    private var comments: [DanmakuComment] = []
+    private var fontSize: CGFloat = 22
+    private var colorMode: DanmakuController.DanmakuColorMode = .original
+    private var customColor: UInt32 = 0xFFFFFF
+    private var opacity: Float = 1
+    private var isPlaying = false
+    private var rate: Float = 1
+    private var lastEngineTime: Double = -1
+    var timeProvider: (() -> Double)?
+
+    private var items: [DanmakuTrackItem] = []
+    private var spriteCache = DanmakuSpriteCache()
+    /// index → 弹幕图层（全量预布置；已滚出的 isHidden 闲置，seek 重摆复用）
+    private var layers: [Int: CALayer] = [:]
+    private var lastScale: CGFloat = 0
+
+    private var laneHeight: CGFloat { fontSize + 12 }
+
+    override var isFlipped: Bool { true } // 顶部原点 y 向下，与车道公式一致
+
+    /// 从控制器同步（Representable 每次刷新调用；显式 diff，值不变零开销）
+    func syncFrom(controller: DanmakuController, currentTime: @escaping () -> Double,
+                  isPlaying playing: Bool, rate newRate: Float) {
+        timeProvider = currentTime
+        var needsRelayout = false
+        if comments != controller.comments {
+            comments = controller.comments
+            needsRelayout = true
+        }
+        if fontSize != controller.fontSize {
+            fontSize = controller.fontSize
+            needsRelayout = true
+        }
+        if colorMode != controller.colorMode || customColor != controller.customColor {
+            colorMode = controller.colorMode
+            customColor = controller.customColor
+            spriteCache.clear() // 颜色口径变了：精灵全部重渲染
+            needsRelayout = true
+        }
+        let engineTime = timeProvider?() ?? 0
+        let playingChanged = isPlaying != playing
+        let rateChanged = abs(rate - newRate) > 0.01
+        isPlaying = playing
+        rate = newRate
+        // seek 跳变（暂停拖动/点击进度/换集）→ 重摆全部动画时间线
+        if timeSync.didSeek(to: engineTime) { needsRelayout = true }
+        // 暂停/恢复/倍速：只切 layer.speed（动画时间线自动缩放/冻结，呈现连续不跳）
+        if playingChanged || rateChanged || needsRelayout {
+            applySpeedAndLayout(needsRelayout: needsRelayout)
+        }
+    }
+
+    private var timeSync = DanmakuTimeSync()
+
+    /// host layer speed：0 = 冻结全部动画（暂停），rate = 倍速跟随视频
+    private func applySpeedAndLayout(needsRelayout: Bool) {
+        guard let container = layer else { return }
+        container.speed = isPlaying ? rate : 0
+        if needsRelayout { relayout() }
+    }
+
+    override func layout() {
+        super.layout()
+        relayout() // 尺寸/跨屏变化：重摆
+    }
+
+    /// 全量布置：为每条弹幕 layer 设 model 状态（画面外起点 + 透明）+ CA 动画。
+    /// 之后的一切（滑入/滚出/隐没/到点出现）由 Core Animation 合成器驱动。
+    private func relayout() {
+        guard window != nil, bounds.width > 0, bounds.height > 0, !comments.isEmpty else {
+            items = []
+            for layer in layers.values { layer.isHidden = true }
+            layers.removeAll()
+            return
+        }
+        let scale = window?.backingScaleFactor ?? 2
+        if scale != lastScale {
+            lastScale = scale
+            spriteCache.clear() // 跨屏清晰度变了：精灵重渲染
+        }
+        laneCountSetup()
+        items = DanmakuLayout.assignLanes(
+            comments: comments,
+            laneCount: laneCount,
+            screenWidth: bounds.width,
+            fontSize: fontSize,
+            measure: { [self] text in spriteCache.measureWidth(text: text, fontSize: fontSize) }
+        )
+
+        guard let container = layer else { return }
+        container.speed = isPlaying ? rate : 0
+        // layer 本地时间（已计入 speed/paused）：暂停时冻结，恢复后动画按相对时刻起跑
+        let localNow = container.convertTime(CACurrentMediaTime(), from: nil)
+        let engineNow = timeProvider?() ?? 0
+
+        for (index, item) in items.enumerated() {
+            let layer = acquireLayer(index: index, item: item, scale: scale)
+            let elapsed = engineNow - item.comment.time
+            let duration: Double
+            switch item.comment.mode {
+            case .scroll: duration = DanmakuLayout.travelDuration
+            case .top, .bottom: duration = DanmakuLayout.stackDuration
+            }
+            layer.removeAnimation(forKey: "danmaku.pos")
+            layer.removeAnimation(forKey: "danmaku.opacity")
+
+            // 已滚出：隐藏闲置（seek 回看时重摆复活）
+            if elapsed >= duration {
+                layer.isHidden = true
+                layer.opacity = 0
+                continue
+            }
+            layer.isHidden = false
+
+            let laneY: CGFloat
+            switch item.comment.mode {
+            case .scroll, .top:
+                laneY = CGFloat(item.lane) * laneHeight + laneHeight / 2 + 4
+            case .bottom:
+                laneY = bounds.height - CGFloat(item.lane + 1) * laneHeight + laneHeight / 2 - 4
+            }
+
+            // 出现/滚动/隐没的时间线（layer 本地时钟；暂停时冻结，恢复不迟到）
+            let beginTime = localNow + max(0, -elapsed) / Double(max(rate, 0.01))
+            let animDuration = duration / Double(max(rate, 0.01))
+
+            let opacityAnim = CABasicAnimation(keyPath: "opacity")
+            opacityAnim.fromValue = Float(1)
+            opacityAnim.toValue = Float(1)
+            opacityAnim.beginTime = beginTime
+            opacityAnim.duration = animDuration
+            opacityAnim.timingFunction = CAMediaTimingFunction(name: .linear)
+            layer.add(opacityAnim, forKey: "danmaku.opacity")
+
+            switch item.comment.mode {
+            case .scroll:
+                // model 位置 = 入场起点（画面右外，被 masksToBounds 裁掉 → 未出现时不可见）
+                let startX = bounds.width + item.width / 2
+                let endX = -item.width / 2
+                layer.position = CGPoint(x: startX, y: laneY)
+                let posAnim = CABasicAnimation(keyPath: "position.x")
+                // from = 当前时刻应在的位置（seek 重摆时 elapsed > 0，起点前推）
+                posAnim.fromValue = Float(startX - elapsed / DanmakuLayout.travelDuration * (bounds.width + item.width))
+                posAnim.toValue = Float(endX)
+                posAnim.beginTime = beginTime
+                posAnim.duration = animDuration
+                posAnim.timingFunction = CAMediaTimingFunction(name: .linear)
+                layer.add(posAnim, forKey: "danmaku.pos")
+            case .top, .bottom:
+                layer.position = CGPoint(x: bounds.width / 2, y: laneY)
+            }
+        }
+    }
+
+    private var laneCount = 8
+    private func laneCountSetup() {
+        laneCount = max(1, Int(bounds.height * DanmakuLayout.scrollAreaRatio / laneHeight))
+    }
+
+    /// 取（或复用）弹幕图层；model 状态置为入场起点 + 透明（未开始/结束后都被裁剪不可见）
+    private func acquireLayer(index: Int, item: DanmakuTrackItem, scale: CGFloat) -> CALayer {
+        let sprite = spriteCache.sprite(
+            text: item.comment.text,
+            color: effectiveColor(item.comment.color),
+            fontSize: fontSize,
+            scale: scale
+        )
+        let layer: CALayer
+        if let reused = layers[index] {
+            layer = reused
+        } else {
+            layer = CALayer()
+            self.layer?.addSublayer(layer)
+            layers[index] = layer
+        }
+        layer.contents = sprite.image
+        layer.bounds = CGRect(origin: .zero, size: CGSize(width: sprite.width, height: sprite.height))
+        layer.contentsGravity = .resize
+        layer.opacity = 0 // model 透明：可见性完全由动画窗口呈现（beginTime 前与结束后隐没）
+        layer.isHidden = false
+        return layer
+    }
+
+    private func effectiveColor(_ original: UInt32) -> UInt32 {
+        switch colorMode {
+        case .original: return original
+        case .white: return 0xFFFFFF
+        case .custom: return customColor
+        }
+    }
+}
+
+/// 引擎时间 seek 检测：time-pos 事件驱动，跳变超阈值判定为 seek（触发弹幕重摆）
 @MainActor
 private final class DanmakuTimeSync {
     private var lastEngine: Double = -1
-    private var lastWall = Date.distantPast
 
-    func smooth(_ engine: Double, now: Date, playing: Bool) -> Double {
-        if engine != lastEngine {
-            lastEngine = engine
-            lastWall = now
-        }
-        guard playing else { return engine }
-        return engine + now.timeIntervalSince(lastWall)
+    func didSeek(to engine: Double) -> Bool {
+        let seeked = lastEngine >= 0 && abs(engine - lastEngine) > 0.5
+        lastEngine = engine
+        return seeked
     }
 }
 
@@ -146,194 +346,6 @@ private final class DanmakuSpriteCache {
         CTLineDraw(ctLine, cg)
         NSGraphicsContext.restoreGraphicsState()
         return Sprite(image: rep.cgImage!, width: textWidth, height: boundsHeight)
-    }
-}
-
-/// 弹幕宿主视图：CALayer 池 + CADisplayLink 逐帧位置更新。
-@MainActor
-final class DanmakuHostView: NSView {
-    // 由 Representable 每次刷新同步（内部显式 diff，值变化才触发重建）
-    private var comments: [DanmakuComment] = []
-    private var fontSize: CGFloat = 22
-    private var colorMode: DanmakuController.DanmakuColorMode = .original
-    private var customColor: UInt32 = 0xFFFFFF
-    private var opacity: Float = 1
-    private var isPlaying = false
-    var timeProvider: (() -> Double)?
-
-    private var items: [DanmakuTrackItem] = []
-    private var spriteCache = DanmakuSpriteCache()
-    private var timeSync = DanmakuTimeSync()
-    /// index → 弹幕图层（懒创建；离开显示窗口回收入池复用）
-    private var activeLayers: [Int: CALayer] = [:]
-    private var freeLayers: [CALayer] = []
-    private var lastScale: CGFloat = 0
-
-    private var laneHeight: CGFloat { fontSize + 12 }
-
-    override var isFlipped: Bool { true } // 顶部原点 y 向下，与车道公式一致
-    // wantsLayer 由 Representable 的 makeNSView 设置
-
-    /// 从控制器同步（Representable 每次刷新调用；显式 diff，值不变零开销）
-    func syncFrom(controller: DanmakuController, currentTime: @escaping () -> Double, isPlaying playing: Bool) {
-        timeProvider = currentTime
-        var needsRebuild = false
-        if comments != controller.comments {
-            comments = controller.comments
-            needsRebuild = true
-        }
-        if fontSize != controller.fontSize {
-            fontSize = controller.fontSize
-            needsRebuild = true
-        }
-        if colorMode != controller.colorMode || customColor != controller.customColor {
-            colorMode = controller.colorMode
-            customColor = controller.customColor
-            spriteCache.clear() // 颜色口径变了：精灵全部重渲染
-            clearLayers()
-            needsRebuild = true
-        }
-        let newOpacity = Float(controller.opacity)
-        if opacity != newOpacity {
-            opacity = newOpacity
-            for layer in activeLayers.values { layer.opacity = newOpacity }
-        }
-        if isPlaying != playing { isPlaying = playing }
-        if needsRebuild { rebuild() }
-    }
-
-    override func layout() {
-        super.layout()
-        rebuild() // 尺寸/跨屏变化：车道与图层重建
-    }
-
-    private func rebuild() {
-        guard bounds.width > 0, bounds.height > 0, !comments.isEmpty else {
-            items = []
-            clearLayers()
-            return
-        }
-        spriteCache.clear() // 字号变了：精灵全部重渲染
-        clearLayers()
-        laneCountSetup()
-        items = DanmakuLayout.assignLanes(
-            comments: comments,
-            laneCount: laneCount,
-            screenWidth: bounds.width,
-            fontSize: fontSize,
-            measure: { [self] text in spriteCache.measureWidth(text: text, fontSize: fontSize) }
-        )
-    }
-
-    private var laneCount = 8
-    private func laneCountSetup() {
-        laneCount = max(1, Int(bounds.height * DanmakuLayout.scrollAreaRatio / laneHeight))
-    }
-
-    private func clearLayers() {
-        for layer in activeLayers.values { layer.removeFromSuperlayer() }
-        activeLayers.removeAll()
-        for layer in freeLayers { layer.removeFromSuperlayer() }
-        freeLayers.removeAll()
-    }
-
-    /// 每帧（TimelineView tick 驱动）：更新可见图层位置；离窗图层回收入池（合成在 GPU）
-    func step() {
-        guard window != nil, !items.isEmpty else { return }
-        let scale = window?.backingScaleFactor ?? 2
-        if scale != lastScale {
-            lastScale = scale
-            spriteCache.clear() // 跨屏清晰度变了
-            clearLayers()
-        }
-        let t = timeSync.smooth(timeProvider?() ?? 0, now: Date(), playing: isPlaying)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true) // 逐帧位置赋值禁用隐式动画（否则拖影）
-        for (index, item) in items.enumerated() {
-            let elapsed = t - item.comment.time
-            let duration: Double
-            switch item.comment.mode {
-            case .scroll: duration = DanmakuLayout.travelDuration
-            case .top, .bottom: duration = DanmakuLayout.stackDuration
-            }
-            let inWindow = elapsed >= 0 && elapsed <= duration
-            if inWindow, activeLayers[index] == nil, freeLayers.isEmpty, activeLayers.count >= 400 {
-                continue // 图层池超限：放弃最不重要的新弹幕（极端弹幕洪流兜底）
-            }
-            if let layer = activeLayers[index] {
-                if inWindow {
-                    layer.frame = displayFrame(item: item, at: elapsed, in: bounds)
-                    layer.isHidden = false
-                } else {
-                    recycle(index: index, layer: layer)
-                }
-            } else if inWindow {
-                let layer = acquireLayer(index: index, item: item, scale: scale)
-                layer.frame = displayFrame(item: item, at: elapsed, in: bounds)
-            }
-        }
-        CATransaction.commit()
-    }
-
-    private func recycle(index: Int, layer: CALayer) {
-        layer.isHidden = true
-        activeLayers.removeValue(forKey: index)
-        freeLayers.append(layer)
-    }
-
-    private func acquireLayer(index: Int, item: DanmakuTrackItem, scale: CGFloat) -> CALayer {
-        let sprite = spriteCache.sprite(
-            text: item.comment.text,
-            color: effectiveColor(item.comment.color),
-            fontSize: fontSize,
-            scale: scale
-        )
-        let layer: CALayer
-        if let reused = freeLayers.popLast() {
-            layer = reused
-        } else {
-            layer = CALayer()
-            self.layer?.addSublayer(layer)
-        }
-        layer.contents = sprite.image
-        layer.bounds = CGRect(origin: .zero, size: CGSize(width: sprite.width, height: sprite.height))
-        layer.contentsGravity = .resize
-        layer.opacity = opacity
-        layer.isHidden = false
-        activeLayers[index] = layer
-        return layer
-    }
-
-    /// 显示窗口内的 frame（flipped 坐标，与车道公式一致）
-    private func displayFrame(item: DanmakuTrackItem, at elapsed: Double, in bounds: CGRect) -> CGRect {
-        let y: CGFloat
-        let x: CGFloat
-        switch item.comment.mode {
-        case .scroll:
-            y = CGFloat(item.lane) * laneHeight + laneHeight / 2 + 4
-            x = (bounds.width + item.width) * (1 - elapsed / DanmakuLayout.travelDuration) - item.width / 2
-        case .top:
-            y = CGFloat(item.lane) * laneHeight + laneHeight / 2 + 4
-            x = bounds.width / 2 - item.width / 2
-        case .bottom:
-            y = bounds.height - CGFloat(item.lane + 1) * laneHeight + laneHeight / 2 - 4
-            x = bounds.width / 2 - item.width / 2
-        }
-        let sprite = spriteCache.sprite(
-            text: item.comment.text,
-            color: effectiveColor(item.comment.color),
-            fontSize: fontSize,
-            scale: window?.backingScaleFactor ?? 2
-        )
-        return CGRect(x: x, y: y - sprite.height / 2, width: sprite.width, height: sprite.height)
-    }
-
-    private func effectiveColor(_ original: UInt32) -> UInt32 {
-        switch colorMode {
-        case .original: return original
-        case .white: return 0xFFFFFF
-        case .custom: return customColor
-        }
     }
 }
 

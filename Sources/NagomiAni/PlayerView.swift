@@ -27,7 +27,8 @@ struct PlayerView: View {
                 DanmakuOverlayView(
                     controller: model.danmaku,
                     currentTime: { model.engine.currentTime },
-                    isPlaying: model.state == .playing
+                    isPlaying: model.state == .playing,
+                    rate: model.engine.rate
                 )
                 .allowsHitTesting(false)
                 GeometryReader { geo in

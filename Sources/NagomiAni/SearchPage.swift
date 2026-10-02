@@ -590,6 +590,11 @@ struct SubjectDetailView: View {
                         online.removeFromLibrary(match)
                     } else {
                         online.addToLibrary(match)
+                        // 收藏 = 确认该片源就是当前条目的资源：立即精确绑定
+                        //（否则云端行只能靠标题反猜匹配，且未点播前一直显示"未关联"）
+                        if online.binding(for: match.seriesKey) == nil {
+                            online.bind(subject: onlineSearchSubject, to: match)
+                        }
                         online.markEpisodesSeen(match) // 收藏即落基准，此后有更新才计"新集"
                     }
                 } label: {

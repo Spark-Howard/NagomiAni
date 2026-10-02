@@ -540,46 +540,64 @@ struct SubjectDetailView: View {
         .background(NagomiTheme.cardBackground, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    /// 片源卡片：站点+标题+关联徽章，点开显示分集行
+    /// 片源卡片：站点+标题+关联徽章，点开显示分集行。
+    /// ⚠️ 书签按钮必须是展开按钮的**兄弟**而非嵌在 label 里（嵌套按钮双触发，CONTEXT 铁律）
     private func onlineSourceCard(_ online: OnlineStore, match: OnlineShow) -> some View {
         let expanded = expandedSourceID == match.id
         return VStack(alignment: .leading, spacing: 8) {
-            Button {
-                expandedSourceID = expanded ? nil : match.id
-                if !expanded {
-                    Task {
-                        await online.ensureEpisodes(for: match)
-                        // 已绑定（首播时自动写入）才拉得到已看徽章；未绑定静默跳过
-                        await online.refreshWatched(for: match)
-                    }
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(match.title)
-                            .font(.callout.weight(.medium))
-                            .lineLimit(1)
-                        HStack(spacing: 6) {
-                            if let site = online.providerName(for: match) {
-                                Text(site)
-                            }
-                            if online.binding(for: match.seriesKey) == subject.id {
-                                NagomiBadge(text: "已关联", foreground: .green, background: .green.opacity(0.15))
-                            }
+            HStack(spacing: 8) {
+                Button {
+                    expandedSourceID = expanded ? nil : match.id
+                    if !expanded {
+                        Task {
+                            await online.ensureEpisodes(for: match)
+                            // 已加入番库的：落"新集"检查基准（与原在线页详情打开即落一致）
+                            online.markEpisodesSeen(match)
+                            // 已绑定（首播时自动写入）才拉得到已看徽章；未绑定静默跳过
+                            await online.refreshWatched(for: match)
                         }
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                     }
-                    Spacer()
-                    Image(systemName: "play.circle")
-                        .foregroundStyle(NagomiTheme.accent)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(match.title)
+                                .font(.callout.weight(.medium))
+                                .lineLimit(1)
+                            HStack(spacing: 6) {
+                                if let site = online.providerName(for: match) {
+                                    Text(site)
+                                }
+                                if online.binding(for: match.seriesKey) == subject.id {
+                                    NagomiBadge(text: "已关联", foreground: .green, background: .green.opacity(0.15))
+                                }
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "play.circle")
+                            .foregroundStyle(NagomiTheme.accent)
+                    }
+                    .contentShape(Rectangle())
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                // 加入番库（云端追番）：收藏后番库页出现云端行（关联/更换/新集提醒/缓存徽章）
+                Button {
+                    if online.isInLibrary(match) {
+                        online.removeFromLibrary(match)
+                    } else {
+                        online.addToLibrary(match)
+                        online.markEpisodesSeen(match) // 收藏即落基准，此后有更新才计"新集"
+                    }
+                } label: {
+                    Image(systemName: online.isInLibrary(match) ? "bookmark.fill" : "bookmark")
+                }
+                .buttonStyle(NagomiIconButtonStyle(size: 22))
+                .help(online.isInLibrary(match) ? "从番库云端移除" : "加入番库（云端追番）")
             }
-            .buttonStyle(.plain)
 
             if expanded {
                 if let episodes = online.episodes[match.id] {

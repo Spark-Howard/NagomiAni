@@ -203,7 +203,10 @@ final class DanmakuHostView: NSView {
             for layer in activeLayers.values { layer.opacity = newOpacity }
         }
         isPlaying = playing
-        if needsRebuild { rebuild() }
+        if needsRebuild {
+            rebuild()
+            step(force: true) // 设置/内容变化立即呈现（暂停时也生效，不等下一 tick）
+        }
     }
 
     func startAnimating() {
@@ -220,9 +223,17 @@ final class DanmakuHostView: NSView {
         timer = nil
     }
 
+    private var lastLayoutSize: CGSize = .zero
+
     override func layout() {
         super.layout()
-        rebuild() // 尺寸/跨屏变化：车道与图层重建
+        // 只在尺寸真变时重摆：AppKit 会因非尺寸原因触发 layout pass，
+        // 暂停期间无谓的 clearLayers+懒重建会造成弹幕闪烁/消失
+        if bounds.size != lastLayoutSize {
+            lastLayoutSize = bounds.size
+            rebuild()
+            step(force: true)
+        }
     }
 
     private func rebuild() {
@@ -231,7 +242,6 @@ final class DanmakuHostView: NSView {
             clearLayers()
             return
         }
-        spriteCache.clear() // 字号变了：精灵全部重渲染
         clearLayers()
         laneCountSetup()
         items = DanmakuLayout.assignLanes(
@@ -258,17 +268,22 @@ final class DanmakuHostView: NSView {
     /// 每帧：把可见弹幕的 layer.frame 直接赋值（无动画对象 → 状态唯一、永不二义）。
     /// 暂停时引擎时间停走 → 位置恒定 = 画面冻结（绝不消失）；
     /// seek/拖动 = 引擎时间跳变 → 下一帧直接重排。
-    func step() {
+    func step(force: Bool = false) {
         guard window != nil, !items.isEmpty else { return }
+        let engineTime = timeProvider?() ?? 0
+        // 暂停且进度未变：完全冻结——不触碰任何图层（暂停期间的 layout pass /
+        // SwiftUI 刷新都不应改变弹幕画面）
+        if !force, !isPlaying, engineTime == lastRenderedTime { return }
         let scale = window?.backingScaleFactor ?? 2
         if scale != lastScale {
             lastScale = scale
             spriteCache.clear() // 跨屏清晰度变了：精灵重渲染
             clearLayers()
         }
-        let t = timeSync.smooth(timeProvider?() ?? 0, now: Date(), playing: isPlaying)
+        let t = timeSync.smooth(engineTime, now: Date(), playing: isPlaying)
         CATransaction.begin()
         CATransaction.setDisableActions(true) // 位置赋值禁用隐式动画（否则拖影）
+        lastRenderedTime = t
         for (index, item) in items.enumerated() {
             let elapsed = t - item.comment.time
             let duration: Double

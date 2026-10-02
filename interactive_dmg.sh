@@ -7,8 +7,8 @@
 set -e
 cd "$(dirname "$0")"
 
-VERSION="${1:-0.1.0}"
-BUILD="${2:-14}"
+VERSION="${1:-0.5.0}"
+BUILD="${2:-1}"
 OUT="dist/NagomiAni-${VERSION}.dmg"
 
 if [ ! -d ".build/package/NagomiAni.app" ]; then

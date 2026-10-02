@@ -67,7 +67,9 @@ final class CoverImageLoader {
     private func download(_ url: URL) async -> NSImage? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 20
-        request.setValue("NagomiAni/0.1.0", forHTTPHeaderField: "User-Agent")
+        // UA 版本从 bundle 读（打包版自动跟随 Info.plist；swift run 无 bundle 回退常量）
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.5.0"
+        request.setValue("NagomiAni/\(appVersion)", forHTTPHeaderField: "User-Agent")
         do {
             let (data, _) = try await URLSession.shared.data(for: request)
             return NSImage(data: data)

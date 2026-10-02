@@ -455,7 +455,7 @@ struct DanmakuSettingsPanel: View {
             }
 
             settingRow("颜色") {
-                HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 6) {
                     NagomiSegmented(
                         options: DanmakuController.DanmakuColorMode.allCases,
                         label: { mode in
@@ -467,10 +467,33 @@ struct DanmakuSettingsPanel: View {
                         },
                         selection: $controller.colorMode
                     )
+                    // 自定义色板（弹层内点选即生效）：不用系统取色器——
+                    // NSColorPanel 是独立窗口，点它会关闭 popover，选色被打断
                     if controller.colorMode == .custom {
-                        ColorPicker("", selection: customColorBinding)
-                            .labelsHidden()
-                            .fixedSize()
+                        HStack(spacing: 8) {
+                            ForEach(Self.palette, id: \.self) { c in
+                                let selected = controller.customColor == c
+                                Button {
+                                    controller.customColor = c
+                                } label: {
+                                    Circle()
+                                        .fill(Color(
+                                            red: Double((c >> 16) & 0xFF) / 255,
+                                            green: Double((c >> 8) & 0xFF) / 255,
+                                            blue: Double(c & 0xFF) / 255
+                                        ))
+                                        .frame(width: 20, height: 20)
+                                        .overlay(
+                                            Circle().strokeBorder(
+                                                selected ? NagomiTheme.accent : Color.white.opacity(0.35),
+                                                lineWidth: selected ? 2 : 1
+                                            )
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                                .help("使用该颜色")
+                            }
+                        }
                     }
                 }
             }
@@ -509,6 +532,12 @@ struct DanmakuSettingsPanel: View {
         .background(NagomiTheme.pageBackground)
     }
 
+    /// 自定义色板（弹层内点选，无外部窗口）
+    static let palette: [UInt32] = [
+        0xFFFFFF, 0xEC6A88, 0xFF4D4D, 0xFFA640, 0xFFE14D,
+        0x6EE77A, 0x4DD8E7, 0x5B8CFF, 0xB56CFF, 0x2A2A2A,
+    ]
+
     private func settingRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
@@ -518,24 +547,4 @@ struct DanmakuSettingsPanel: View {
         }
     }
 
-    /// UInt32 (0xRRGGBB) ↔ SwiftUI Color
-    private var customColorBinding: Binding<Color> {
-        Binding(
-            get: {
-                let c = controller.customColor
-                return Color(
-                    red: Double((c >> 16) & 0xFF) / 255,
-                    green: Double((c >> 8) & 0xFF) / 255,
-                    blue: Double(c & 0xFF) / 255
-                )
-            },
-            set: { color in
-                let ns = NSColor(color).usingColorSpace(.sRGB)
-                let r = UInt32(round((ns?.redComponent ?? 0) * 255))
-                let g = UInt32(round((ns?.greenComponent ?? 0) * 255))
-                let b = UInt32(round((ns?.blueComponent ?? 0) * 255))
-                controller.customColor = (r << 16) | (g << 8) | b
-            }
-        )
-    }
 }

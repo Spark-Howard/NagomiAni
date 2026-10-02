@@ -2,37 +2,30 @@ import CoreText
 import SwiftUI
 import NagomiAniCore
 
-/// 弹幕覆盖层：**Core Animation 原生动画驱动**（第四轮，终局方案）。
+/// 弹幕覆盖层：常驻逐帧驱动 + 图层直接赋值（第五轮，终局）。
 ///
-/// 帧率问题演进：
-/// ① Canvas 逐帧 Text 排版（字体度量掉帧）→ ② 位图精灵 + Canvas（Canvas 是 CPU
-/// 光栅化，每帧重画整块区域位图，仍卡）→ ③ CALayer + TimelineView tick 逐帧赋值
-/// （SwiftUI 调度抖动使 tick 不稳，仍卡）→ ④ 现在：每条弹幕 layer 挂 `CABasicAnimation`，
-/// **插值与合成全部由 Core Animation 在 GPU 完成，CPU 逐帧开销为零**，无任何 tick 驱动。
-///
-/// 关键机制：
-/// - 可见性 = "model 位置在画面外 + `masksToBounds` 裁剪"天然保证（动画未开始/已结束
-///   时 layer 回到 model 值即画面外），opacity 动画负责出现/隐没；
-/// - 暂停/恢复/倍速 = 宿主 `layer.speed`（0 = 全部动画冻结，含未来动画的 beginTime）；
-/// - seek = 引擎时间跳变检测 → 全量重摆（用 layer 本地时钟算未来动画 beginTime，
-///   暂停期间 seek 也不迟到）；
-/// - 滚动弹幕匀速（linear timing），与同步阈值/连播窗口无耦合。
+/// 历史教训（勿走回头路）：
+/// ① Canvas 逐帧 Text 排版——CPU 光栅化，掉帧；
+/// ② 位图精灵 + Canvas——光栅化依旧，卡；
+/// ③ CALayer + TimelineView tick——SwiftUI 调度抖动，tick 忽快忽慢，卡；
+/// ④ CAAnimation 原生动画——模型值/呈现值分离 + speed + beginTime 的组合陷阱：
+///    暂停时弹幕消失、进入视频不显示、seek 误判每秒重摆（视频 1fps）。
+/// ⑤ 现在：DispatchSourceTimer（主队列 60Hz，独立于 SwiftUI 调度）每帧把可见弹幕
+///    的 layer.frame **直接赋值**——没有动画对象、没有 model/呈现二义性：
+///    暂停 = 位置不再变化（必然冻结、绝不消失）；seek/拖动 = 下一帧直接重排；
+///    引擎时间插值（time-pos ~1Hz → 墙钟补齐）保证滚动逐帧平滑。
+/// CPU 每帧 = 可见弹幕数 × 一次坐标赋值（微不足道），合成在 GPU。
 /// 不参与命中测试：控制条/顶栏在其上层正常交互。
 struct DanmakuOverlayView: View {
     @ObservedObject var controller: DanmakuController
-    /// 引擎当前播放时间（诊断用；弹幕动画由 Core Animation 自驱，不依赖它逐帧更新）
+    /// 引擎当前播放时间（每帧读取，插值锚点）
     let currentTime: () -> Double
-    /// 是否正在播放（暂停 = 冻结全部动画）
+    /// 是否正在播放（暂停 = 时间停走，画面冻结）
     let isPlaying: Bool
-    /// seek 重摆信号（用户拖进度/换集时递增）
-    let seekRevision: Int
 
     var body: some View {
-        DanmakuLayerRepresentable(
-            controller: controller, currentTime: currentTime,
-            isPlaying: isPlaying, seekRevision: seekRevision
-        )
-        .allowsHitTesting(false)
+        DanmakuLayerRepresentable(controller: controller, currentTime: currentTime, isPlaying: isPlaying)
+            .allowsHitTesting(false)
     }
 }
 
@@ -40,225 +33,41 @@ private struct DanmakuLayerRepresentable: NSViewRepresentable {
     @ObservedObject var controller: DanmakuController
     let currentTime: () -> Double
     let isPlaying: Bool
-    let seekRevision: Int
 
     func makeNSView(context: Context) -> DanmakuHostView {
         let host = DanmakuHostView()
         host.wantsLayer = true
         // 子图层默认不裁剪（弹幕起点在画面外会被画到视频区域外）——必须显式裁剪
         host.layer?.masksToBounds = true
-        host.syncFrom(controller: controller, seekRevision: seekRevision, isPlaying: isPlaying)
+        host.syncFrom(controller: controller, isPlaying: isPlaying)
+        host.startAnimating()
         return host
     }
 
     func updateNSView(_ host: DanmakuHostView, context: Context) {
-        host.syncFrom(controller: controller, seekRevision: seekRevision, isPlaying: isPlaying)
+        host.syncFrom(controller: controller, isPlaying: isPlaying)
+    }
+
+    static func dismantleNSView(_ host: DanmakuHostView, coordinator: ()) {
+        host.stopAnimating()
     }
 }
 
-/// 弹幕宿主视图：CALayer 池 + Core Animation 原生动画（无逐帧 CPU 工作）。
-@MainActor
-final class DanmakuHostView: NSView {
-    private var comments: [DanmakuComment] = []
-    private var fontSize: CGFloat = 22
-    private var colorMode: DanmakuController.DanmakuColorMode = .original
-    private var customColor: UInt32 = 0xFFFFFF
-    private var opacity: Float = 1
-    private var isPlaying = false
-    private var seekRevision = 0
-    var timeProvider: (() -> Double)?
-
-    private var items: [DanmakuTrackItem] = []
-    private var spriteCache = DanmakuSpriteCache()
-    /// index → 弹幕图层（全量预布置；已滚出的 isHidden 闲置，seek 重摆复用）
-    private var layers: [Int: CALayer] = [:]
-    private var lastScale: CGFloat = 0
-
-    private var laneHeight: CGFloat { fontSize + 12 }
-
-    override var isFlipped: Bool { true } // 顶部原点 y 向下，与车道公式一致
-
-    /// 从控制器同步（Representable 每次刷新调用；显式 diff，值不变零开销）
-    func syncFrom(controller: DanmakuController, seekRevision newSeekRevision: Int,
-                  isPlaying playing: Bool) {
-        var needsRelayout = false
-        if comments != controller.comments {
-            comments = controller.comments
-            needsRelayout = true
-        }
-        if fontSize != controller.fontSize {
-            fontSize = controller.fontSize
-            needsRelayout = true
-        }
-        if colorMode != controller.colorMode || customColor != controller.customColor {
-            colorMode = controller.colorMode
-            customColor = controller.customColor
-            spriteCache.clear() // 颜色口径变了：精灵全部重渲染
-            needsRelayout = true
-        }
-        let playingChanged = isPlaying != playing
-        isPlaying = playing
-        // seek 重摆：显式信号（PlayerModel.seek/load → markSeeked），
-        // 与引擎 time-pos 事件频率彻底解耦（低频事件曾致每秒误触发全量重摆）
-        if seekRevision != newSeekRevision {
-            seekRevision = newSeekRevision
-            needsRelayout = true
-        }
-        // 暂停/恢复：只切 layer.speed（动画时间线冻结/恢复，呈现连续不跳）
-        if playingChanged || needsRelayout {
-            applySpeedAndLayout(needsRelayout: needsRelayout)
-        }
-    }
-
-    private var timeSync = DanmakuTimeSync()
-
-    /// host layer speed：0 = 冻结全部动画（暂停），1 = 正常播放
-    private func applySpeedAndLayout(needsRelayout: Bool) {
-        guard let container = layer else { return }
-        container.speed = isPlaying ? 1 : 0
-        if needsRelayout { relayout() }
-    }
-
-    override func layout() {
-        super.layout()
-        relayout() // 尺寸/跨屏变化：重摆
-    }
-
-    /// 全量布置：为每条弹幕 layer 设 model 状态（画面外起点 + 透明）+ CA 动画。
-    /// 之后的一切（滑入/滚出/隐没/到点出现）由 Core Animation 合成器驱动。
-    private func relayout() {
-        guard window != nil, bounds.width > 0, bounds.height > 0, !comments.isEmpty else {
-            items = []
-            for layer in layers.values { layer.isHidden = true }
-            layers.removeAll()
-            return
-        }
-        let scale = window?.backingScaleFactor ?? 2
-        if scale != lastScale {
-            lastScale = scale
-            spriteCache.clear() // 跨屏清晰度变了：精灵重渲染
-        }
-        laneCountSetup()
-        items = DanmakuLayout.assignLanes(
-            comments: comments,
-            laneCount: laneCount,
-            screenWidth: bounds.width,
-            fontSize: fontSize,
-            measure: { [self] text in spriteCache.measureWidth(text: text, fontSize: fontSize) }
-        )
-
-        guard let container = layer else { return }
-        container.speed = isPlaying ? 1 : 0
-        // layer 本地时间（已计入 speed/paused）：暂停时冻结，恢复后动画按相对时刻起跑
-        let localNow = container.convertTime(CACurrentMediaTime(), from: nil)
-        let engineNow = timeProvider?() ?? 0
-
-        for (index, item) in items.enumerated() {
-            let layer = acquireLayer(index: index, item: item, scale: scale)
-            let elapsed = engineNow - item.comment.time
-            let duration: Double
-            switch item.comment.mode {
-            case .scroll: duration = DanmakuLayout.travelDuration
-            case .top, .bottom: duration = DanmakuLayout.stackDuration
-            }
-            layer.removeAnimation(forKey: "danmaku.pos")
-            layer.removeAnimation(forKey: "danmaku.opacity")
-
-            // 已滚出：隐藏闲置（seek 回看时重摆复活）
-            if elapsed >= duration {
-                layer.isHidden = true
-                layer.opacity = 0
-                continue
-            }
-            layer.isHidden = false
-
-            let laneY: CGFloat
-            switch item.comment.mode {
-            case .scroll, .top:
-                laneY = CGFloat(item.lane) * laneHeight + laneHeight / 2 + 4
-            case .bottom:
-                laneY = bounds.height - CGFloat(item.lane + 1) * laneHeight + laneHeight / 2 - 4
-            }
-
-            // 出现/滚动/隐没的时间线（layer 本地时钟；暂停时冻结，恢复不迟到）
-            let beginTime = localNow + max(0, -elapsed)
-            let animDuration = duration
-
-            let opacityAnim = CABasicAnimation(keyPath: "opacity")
-            opacityAnim.fromValue = Float(1)
-            opacityAnim.toValue = Float(1)
-            opacityAnim.beginTime = beginTime
-            opacityAnim.duration = animDuration
-            opacityAnim.timingFunction = CAMediaTimingFunction(name: .linear)
-            layer.add(opacityAnim, forKey: "danmaku.opacity")
-
-            switch item.comment.mode {
-            case .scroll:
-                // model 位置 = 入场起点（画面右外，被 masksToBounds 裁掉 → 未出现时不可见）
-                let startX = bounds.width + item.width / 2
-                let endX = -item.width / 2
-                layer.position = CGPoint(x: startX, y: laneY)
-                let posAnim = CABasicAnimation(keyPath: "position.x")
-                // from = 当前时刻应在的位置（seek 重摆时 elapsed > 0，起点前推）
-                posAnim.fromValue = Float(startX - elapsed / DanmakuLayout.travelDuration * (bounds.width + item.width))
-                posAnim.toValue = Float(endX)
-                posAnim.beginTime = beginTime
-                posAnim.duration = animDuration
-                posAnim.timingFunction = CAMediaTimingFunction(name: .linear)
-                layer.add(posAnim, forKey: "danmaku.pos")
-            case .top, .bottom:
-                layer.position = CGPoint(x: bounds.width / 2, y: laneY)
-            }
-        }
-    }
-
-    private var laneCount = 8
-    private func laneCountSetup() {
-        laneCount = max(1, Int(bounds.height * DanmakuLayout.scrollAreaRatio / laneHeight))
-    }
-
-    /// 取（或复用）弹幕图层；model 状态置为入场起点 + 透明（未开始/结束后都被裁剪不可见）
-    private func acquireLayer(index: Int, item: DanmakuTrackItem, scale: CGFloat) -> CALayer {
-        let sprite = spriteCache.sprite(
-            text: item.comment.text,
-            color: effectiveColor(item.comment.color),
-            fontSize: fontSize,
-            scale: scale
-        )
-        let layer: CALayer
-        if let reused = layers[index] {
-            layer = reused
-        } else {
-            layer = CALayer()
-            self.layer?.addSublayer(layer)
-            layers[index] = layer
-        }
-        layer.contents = sprite.image
-        layer.bounds = CGRect(origin: .zero, size: CGSize(width: sprite.width, height: sprite.height))
-        layer.contentsGravity = .resize
-        layer.opacity = 0 // model 透明：可见性完全由动画窗口呈现（beginTime 前与结束后隐没）
-        layer.isHidden = false
-        return layer
-    }
-
-    private func effectiveColor(_ original: UInt32) -> UInt32 {
-        switch colorMode {
-        case .original: return original
-        case .white: return 0xFFFFFF
-        case .custom: return customColor
-        }
-    }
-}
-
-/// 引擎时间 seek 检测：time-pos 事件驱动，跳变超阈值判定为 seek（触发弹幕重摆）
+/// 引擎时间 → 渲染时间插值：time-pos 事件频率低且不稳（~1Hz 实测），
+/// 直接驱动会出现台阶感——以最近一次引擎时间为锚点、墙钟补齐帧间增量；
+/// 锚点随每次事件刷新，误差不跨事件累积（≤ 一个事件间隔，可忽略）。
 @MainActor
 private final class DanmakuTimeSync {
     private var lastEngine: Double = -1
+    private var lastWall = Date.distantPast
 
-    func didSeek(to engine: Double) -> Bool {
-        let seeked = lastEngine >= 0 && abs(engine - lastEngine) > 0.5
-        lastEngine = engine
-        return seeked
+    func smooth(_ engine: Double, now: Date, playing: Bool) -> Double {
+        if engine != lastEngine {
+            lastEngine = engine
+            lastWall = now
+        }
+        guard playing else { return engine }
+        return engine + now.timeIntervalSince(lastWall)
     }
 }
 
@@ -346,54 +155,352 @@ private final class DanmakuSpriteCache {
     }
 }
 
-/// 控制条弹幕菜单：显示开关 / 显示设置（字号/颜色/不透明度一级直达）/ 状态 / 重新获取。
-/// 用户要求设置项放一级菜单（不走二级 sheet）；颜色选"自定义"时菜单内直接出取色器。
+/// 弹幕宿主视图：CALayer 池 + 常驻定时器逐帧赋值（无动画对象，状态唯一）。
+@MainActor
+final class DanmakuHostView: NSView {
+    private var comments: [DanmakuComment] = []
+    private var fontSize: CGFloat = 22
+    private var colorMode: DanmakuController.DanmakuColorMode = .original
+    private var customColor: UInt32 = 0xFFFFFF
+    private var opacity: Float = 1
+    private var isPlaying = false
+    var timeProvider: (() -> Double)?
+
+    private var items: [DanmakuTrackItem] = []
+    private var spriteCache = DanmakuSpriteCache()
+    private var timeSync = DanmakuTimeSync()
+    private var timer: DispatchSourceTimer?
+    /// index → 弹幕图层（懒创建；离开显示窗口回收入池复用）
+    private var activeLayers: [Int: CALayer] = [:]
+    private var freeLayers: [CALayer] = []
+    private var lastScale: CGFloat = 0
+    private var lastRenderedTime: Double = -1
+
+    private var laneHeight: CGFloat { fontSize + 12 }
+
+    override var isFlipped: Bool { true } // 顶部原点 y 向下，与车道公式一致
+
+    /// 从控制器同步（Representable 每次刷新调用；显式 diff，值不变零开销）
+    func syncFrom(controller: DanmakuController, isPlaying playing: Bool) {
+        var needsRebuild = false
+        if comments != controller.comments {
+            comments = controller.comments
+            needsRebuild = true
+        }
+        if fontSize != controller.fontSize {
+            fontSize = controller.fontSize
+            needsRebuild = true
+        }
+        if colorMode != controller.colorMode || customColor != controller.customColor {
+            colorMode = controller.colorMode
+            customColor = controller.customColor
+            spriteCache.clear() // 颜色口径变了：精灵全部重渲染
+            needsRebuild = true
+        }
+        let newOpacity = Float(controller.opacity)
+        if opacity != newOpacity {
+            opacity = newOpacity
+            for layer in activeLayers.values { layer.opacity = newOpacity }
+        }
+        isPlaying = playing
+        if needsRebuild { rebuild() }
+    }
+
+    func startAnimating() {
+        guard timer == nil else { return }
+        let source = DispatchSource.makeTimerSource(queue: .main)
+        source.schedule(deadline: .now(), repeating: .milliseconds(16), leeway: .milliseconds(1))
+        source.setEventHandler { [weak self] in self?.step() }
+        source.resume()
+        timer = source
+    }
+
+    func stopAnimating() {
+        timer?.cancel()
+        timer = nil
+    }
+
+    override func layout() {
+        super.layout()
+        rebuild() // 尺寸/跨屏变化：车道与图层重建
+    }
+
+    private func rebuild() {
+        guard bounds.width > 0, bounds.height > 0, !comments.isEmpty else {
+            items = []
+            clearLayers()
+            return
+        }
+        spriteCache.clear() // 字号变了：精灵全部重渲染
+        clearLayers()
+        laneCountSetup()
+        items = DanmakuLayout.assignLanes(
+            comments: comments,
+            laneCount: laneCount,
+            screenWidth: bounds.width,
+            fontSize: fontSize,
+            measure: { [self] text in spriteCache.measureWidth(text: text, fontSize: fontSize) }
+        )
+    }
+
+    private var laneCount = 8
+    private func laneCountSetup() {
+        laneCount = max(1, Int(bounds.height * DanmakuLayout.scrollAreaRatio / laneHeight))
+    }
+
+    private func clearLayers() {
+        for layer in activeLayers.values { layer.removeFromSuperlayer() }
+        activeLayers.removeAll()
+        for layer in freeLayers { layer.removeFromSuperlayer() }
+        freeLayers.removeAll()
+    }
+
+    /// 每帧：把可见弹幕的 layer.frame 直接赋值（无动画对象 → 状态唯一、永不二义）。
+    /// 暂停时引擎时间停走 → 位置恒定 = 画面冻结（绝不消失）；
+    /// seek/拖动 = 引擎时间跳变 → 下一帧直接重排。
+    func step() {
+        guard window != nil, !items.isEmpty else { return }
+        let scale = window?.backingScaleFactor ?? 2
+        if scale != lastScale {
+            lastScale = scale
+            spriteCache.clear() // 跨屏清晰度变了：精灵重渲染
+            clearLayers()
+        }
+        let t = timeSync.smooth(timeProvider?() ?? 0, now: Date(), playing: isPlaying)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true) // 位置赋值禁用隐式动画（否则拖影）
+        for (index, item) in items.enumerated() {
+            let elapsed = t - item.comment.time
+            let duration: Double
+            switch item.comment.mode {
+            case .scroll: duration = DanmakuLayout.travelDuration
+            case .top, .bottom: duration = DanmakuLayout.stackDuration
+            }
+            let inWindow = elapsed >= 0 && elapsed <= duration
+            if let layer = activeLayers[index] {
+                if inWindow {
+                    layer.frame = displayFrame(item: item, at: elapsed, in: bounds)
+                    layer.isHidden = false
+                } else {
+                    recycle(index: index, layer: layer)
+                }
+            } else if inWindow {
+                if freeLayers.isEmpty, activeLayers.count >= 400 {
+                    continue // 图层池超限：放弃新弹幕（极端弹幕洪流兜底）
+                }
+                let layer = acquireLayer(index: index, item: item, scale: scale)
+                layer.opacity = opacity
+                layer.frame = displayFrame(item: item, at: elapsed, in: bounds)
+            }
+        }
+        CATransaction.commit()
+    }
+
+    private func recycle(index: Int, layer: CALayer) {
+        layer.isHidden = true
+        activeLayers.removeValue(forKey: index)
+        freeLayers.append(layer)
+    }
+
+    private func acquireLayer(index: Int, item: DanmakuTrackItem, scale: CGFloat) -> CALayer {
+        let sprite = spriteCache.sprite(
+            text: item.comment.text,
+            color: effectiveColor(item.comment.color),
+            fontSize: fontSize,
+            scale: scale
+        )
+        let layer: CALayer
+        if let reused = freeLayers.popLast() {
+            layer = reused
+        } else {
+            layer = CALayer()
+            self.layer?.addSublayer(layer)
+        }
+        layer.contents = sprite.image
+        layer.bounds = CGRect(origin: .zero, size: CGSize(width: sprite.width, height: sprite.height))
+        layer.contentsGravity = .resize
+        layer.opacity = opacity
+        layer.isHidden = false
+        activeLayers[index] = layer
+        return layer
+    }
+
+    /// 显示窗口内的 frame（flipped 坐标，与车道公式一致）
+    private func displayFrame(item: DanmakuTrackItem, at elapsed: Double, in bounds: CGRect) -> CGRect {
+        let y: CGFloat
+        let x: CGFloat
+        switch item.comment.mode {
+        case .scroll:
+            y = CGFloat(item.lane) * laneHeight + laneHeight / 2 + 4
+            x = (bounds.width + item.width) * (1 - elapsed / DanmakuLayout.travelDuration) - item.width / 2
+        case .top:
+            y = CGFloat(item.lane) * laneHeight + laneHeight / 2 + 4
+            x = bounds.width / 2 - item.width / 2
+        case .bottom:
+            y = bounds.height - CGFloat(item.lane + 1) * laneHeight + laneHeight / 2 - 4
+            x = bounds.width / 2 - item.width / 2
+        }
+        let sprite = spriteCache.sprite(
+            text: item.comment.text,
+            color: effectiveColor(item.comment.color),
+            fontSize: fontSize,
+            scale: window?.backingScaleFactor ?? 2
+        )
+        return CGRect(x: x, y: y - sprite.height / 2, width: sprite.width, height: sprite.height)
+    }
+
+    private func effectiveColor(_ original: UInt32) -> UInt32 {
+        switch colorMode {
+        case .original: return original
+        case .white: return 0xFFFFFF
+        case .custom: return customColor
+        }
+    }
+}
+
+/// 弹幕控制按钮 + 自绘设置弹层（Nagomi 风格，不用原生 NSMenu——与全应用视觉统一）。
+/// 字号/颜色/不透明度以胶囊分段直接平铺，点选即生效（无需二级悬浮）。
 /// 凭据已内置（弹弹play），无凭据输入项（见 DanmakuEmbeddedCredentials）。
 struct DanmakuMenu: View {
     @ObservedObject var controller: DanmakuController
+    @State private var showPanel = false
 
     var body: some View {
-        Menu {
-            Toggle("弹幕显示", isOn: $controller.isEnabled)
-            Divider()
-            Picker("字号", selection: $controller.fontSize) {
-                Text("小（18）").tag(CGFloat(18))
-                Text("标准（22）").tag(CGFloat(22))
-                Text("大（28）").tag(CGFloat(28))
-            }
-            Picker("颜色", selection: $controller.colorMode) {
-                ForEach(DanmakuController.DanmakuColorMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            if controller.colorMode == .custom {
-                ColorPicker("自定义颜色", selection: customColorBinding)
-            }
-            Picker("不透明度", selection: $controller.opacity) {
-                Text("30%").tag(Double(0.3))
-                Text("60%").tag(Double(0.6))
-                Text("100%").tag(Double(1.0))
-            }
-            Divider()
-            Text(controller.statusDescription)
-                .foregroundStyle(.secondary)
-            Button {
-                controller.refetch()
-            } label: {
-                Label("重新获取弹幕", systemImage: "arrow.clockwise")
-            }
-            .disabled(!controller.isEnabled || !controller.isConfigured)
+        Button {
+            showPanel.toggle()
         } label: {
             Image(systemName: controller.isEnabled
                   ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
                 .font(.title3)
                 .foregroundStyle(controller.isEnabled ? NagomiTheme.accent : .white)
+                .frame(width: 26, height: 26)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .buttonStyle(.plain)
         .nagomiHoverHighlight(Color.white.opacity(0.14), in: Circle())
         .help(controller.isEnabled ? "弹幕：开" : "弹幕：关")
+        .popover(isPresented: $showPanel, arrowEdge: .top) {
+            DanmakuSettingsPanel(controller: controller)
+        }
+    }
+}
+
+/// 樱粉分段选择器：胶囊按钮组（选中 = accentSoft 底 + accent 字），不改布局尺寸
+struct NagomiSegmented<Option: Hashable>: View {
+    let options: [Option]
+    let label: (Option) -> String
+    @Binding var selection: Option
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(options, id: \.self) { option in
+                let selected = option == selection
+                Button {
+                    selection = option
+                } label: {
+                    Text(label(option))
+                        .font(.callout.weight(selected ? .semibold : .regular))
+                        .foregroundStyle(selected ? NagomiTheme.accent : .primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            selected ? NagomiTheme.accentSoft : NagomiTheme.cardBackground,
+                            in: Capsule()
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+/// 弹幕设置弹层（自绘）：显示开关 / 字号 / 颜色 / 不透明度 / 状态 / 重新获取。
+/// 凭据已内置（弹弹play），无凭据输入项（见 DanmakuEmbeddedCredentials 注释）。
+struct DanmakuSettingsPanel: View {
+    @ObservedObject var controller: DanmakuController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("弹幕设置")
+                    .font(.headline)
+                Spacer()
+                Toggle("显示", isOn: $controller.isEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
+
+            Divider()
+
+            settingRow("字号") {
+                NagomiSegmented(
+                    options: [CGFloat(18), CGFloat(22), CGFloat(28)],
+                    label: { $0 == 18 ? "小" : $0 == 22 ? "标准" : "大" },
+                    selection: $controller.fontSize
+                )
+            }
+
+            settingRow("颜色") {
+                HStack(spacing: 6) {
+                    NagomiSegmented(
+                        options: DanmakuController.DanmakuColorMode.allCases,
+                        label: { mode in
+                            switch mode {
+                            case .original: return "跟随弹幕"
+                            case .white: return "纯白"
+                            case .custom: return "自定义"
+                            }
+                        },
+                        selection: $controller.colorMode
+                    )
+                    if controller.colorMode == .custom {
+                        ColorPicker("", selection: customColorBinding)
+                            .labelsHidden()
+                            .fixedSize()
+                    }
+                }
+            }
+
+            settingRow("不透明度") {
+                NagomiSegmented(
+                    options: [Double(0.3), Double(0.6), Double(1.0)],
+                    label: { "\(Int($0 * 100))%" },
+                    selection: $controller.opacity
+                )
+            }
+
+            Divider()
+
+            HStack(spacing: 6) {
+                Text("状态")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(controller.statusDescription)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Spacer()
+                Button("重新获取") { controller.refetch() }
+                    .buttonStyle(NagomiSecondaryButtonStyle())
+                    .controlSize(.small)
+                    .disabled(!controller.isEnabled || !controller.isConfigured)
+            }
+
+            Text("弹幕来自弹弹play（服务已内置）。在线番按剧名+集号、本地番按文件指纹自动匹配，找不到不显示（宁缺毋滥）；与字幕同时显示互不影响。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(width: 320)
+        .background(NagomiTheme.pageBackground)
+    }
+
+    private func settingRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            content()
+        }
     }
 
     /// UInt32 (0xRRGGBB) ↔ SwiftUI Color

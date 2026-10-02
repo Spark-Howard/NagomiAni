@@ -106,10 +106,6 @@ final class DanmakuController: ObservableObject {
         { let v = UserDefaults.standard.double(forKey: "danmaku.opacity"); return v > 0 ? v : 1.0 }()
     { didSet { UserDefaults.standard.set(opacity, forKey: "danmaku.opacity") } }
 
-    /// seek 重摆信号：用户拖进度/换集时 +1，弹幕层据此重摆动画时间线
-    /// （引擎 time-pos 事件频率不稳定，不能用"时间跳变"推断 seek）
-    @Published private(set) var seekRevision = 0
-    func markSeeked() { seekRevision += 1 }
 
     /// 当前状态的人类可读描述（控制条菜单与设置面板共用）
     var statusDescription: String {

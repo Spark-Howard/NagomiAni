@@ -434,6 +434,11 @@ struct SubjectDetailView: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
             }
         }
+        .onAppear {
+            // 同页覆盖层切换不触发 selection 变化：详情出现时兜底清一次焦点环残留
+            //（搜索框聚焦后点进详情的场景，环画在窗口覆盖层、@FocusState 失焦也压不住背景）
+            FocusRingSuppressor.suppressInKeyWindow()
+        }
         .overlay(alignment: .top) {
             if let error = model.detailError {
                 Text(error)

@@ -39,6 +39,18 @@ struct ContentView: View {
         // 全局禁用焦点环（点击/Tab 后按钮周围的蓝色框，用户要求去除）；
         // 键盘导航的视觉指示一并关闭——已获用户确认
         .focusEffectDisabled()
+        // 焦点环残留治理（第三层防御，见 FocusRingSuppressor 注释）：
+        // 切页/窗口激活/弹窗开关时交出焦点并对视图树里的 AppKit 控件禁用系统焦点环
+        .onChange(of: selection) { _ in
+            NSApp.keyWindow?.makeFirstResponder(nil)
+            FocusRingSuppressor.suppressInKeyWindow()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            FocusRingSuppressor.suppressInKeyWindow()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEndSheetNotification)) { _ in
+            FocusRingSuppressor.suppressInKeyWindow()
+        }
         // 不用窗口工具栏：播放器/番库/Bangumi 三页顶部（标题栏）高度保持一致，
         // 避免切换页面时 UI 上下跳动（"打开文件"按钮已移入播放器顶部栏）
         .onAppear {
@@ -345,6 +357,29 @@ struct ContentView: View {
                 webChat.showLoginPage()
             }
         }
+    }
+}
+
+/// AppKit 焦点环兜底禁用：`.focusEffectDisabled()` 只管 SwiftUI 的焦点效果，
+/// 而 NSTextField/NSButton 的系统焦点环画在**窗口独立覆盖层**上（SwiftUI 盖不住），
+/// 页面隐藏（opacity 0）后环仍留在背景——惰性挂载架构下尤其明显。
+/// 对视图树里所有 AppKit 文本框/按钮设 `focusRingType = .none`（幂等，开销可忽略），
+/// 在切页 / 窗口激活 / 弹窗关闭时机调用。
+enum FocusRingSuppressor {
+    static func suppressInKeyWindow() {
+        if let contentView = NSApp.keyWindow?.contentView {
+            suppressRecursively(in: contentView)
+        }
+    }
+
+    static func suppressRecursively(in view: NSView) {
+        if let field = view as? NSTextField {
+            field.focusRingType = .none
+        }
+        if let button = view as? NSButton {
+            button.focusRingType = .none
+        }
+        view.subviews.forEach(suppressRecursively)
     }
 }
 

@@ -20,6 +20,8 @@ struct ContentView: View {
     @State private var visited: Set<SidebarItem> = [.player]
     /// 继续观看区块的刷新标记（切页时 +1，番库页据此重算卡片）
     @State private var continueWatchingRevision = 0
+    /// 应用内更新（启动静默检查 GitHub Releases；发现新版本浮横幅）
+    @StateObject private var updater = UpdateCenter.shared
 
     var body: some View {
         HStack(spacing: 0) {
@@ -33,6 +35,12 @@ struct ContentView: View {
                 // 列表页淡粉底（页面自身透明，底色统一从这里来）
                 .background(NagomiTheme.pageBackground)
         }
+        // 应用内更新：启动 5s 后静默检查；发现新版本/下载中/安装中浮横幅
+        .overlay(alignment: .top) {
+            UpdateBanner(updater: updater)
+                .padding(.top, 10)
+        }
+        .task { await updater.startupCheck() }
         .environmentObject(contacts)
         // 全局品牌色：按钮/进度条/滑块/开关等 accent 语义控件自动跟随樱粉
         .tint(NagomiTheme.accent)
@@ -357,6 +365,88 @@ struct ContentView: View {
                 webChat.showLoginPage()
             }
         }
+    }
+}
+
+/// 应用内更新横幅：发现新版本 / 下载中 / 安装中 / 失败兜底。
+/// 浮动胶囊（top-center），点击「立即更新」全程免手动——下载完自动替换重启。
+private struct UpdateBanner: View {
+    @ObservedObject var updater: UpdateCenter
+
+    var body: some View {
+        switch updater.phase {
+        case .idle, .checking:
+            EmptyView()
+
+        case .available(let release):
+            banner {
+                Text("发现新版本 v\(release.version)")
+                    .font(.callout.weight(.medium))
+                Button("立即更新") {
+                    updater.update(to: release)
+                }
+                .buttonStyle(NagomiPrimaryButtonStyle())
+                .controlSize(.small)
+                closeButton
+            }
+
+        case .downloading(let release, let progress):
+            banner {
+                Text("正在下载 v\(release.version)")
+                    .font(.callout)
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 110)
+                Text("\(Int((progress * 100).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, alignment: .trailing)
+            }
+
+        case .installing:
+            banner {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在安装，应用将自动重启…")
+                    .font(.callout)
+            }
+
+        case .failed(_, let message):
+            banner {
+                Text("更新失败：\(message)")
+                    .font(.callout)
+                    .lineLimit(1)
+                Button("打开下载页") {
+                    updater.openDownloadPage()
+                }
+                .buttonStyle(NagomiSecondaryButtonStyle())
+                .controlSize(.small)
+                closeButton
+            }
+        }
+    }
+
+    private func banner<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 10, content: content)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(NagomiTheme.accent.opacity(0.35), lineWidth: 1))
+            .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .animation(.easeOut(duration: 0.25), value: updater.phase)
+    }
+
+    private var closeButton: some View {
+        Button {
+            updater.dismiss()
+        } label: {
+            Image(systemName: "xmark")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("暂不更新")
     }
 }
 

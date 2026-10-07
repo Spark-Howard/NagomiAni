@@ -3,11 +3,19 @@ import SwiftUI
 @main
 struct NagomiAniApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
     var body: some Scene {
         WindowGroup("NagomiAni") {
             ContentView()
                 .frame(minWidth: 720, minHeight: 480)
+        }
+        .commands {
+            // 应用菜单「检查更新…」（开发模式内部静默跳过）
+            CommandGroup(after: .newItem) {
+                Button("检查更新…") {
+                    Task { await UpdateCenter.shared.check() }
+                }
+                .keyboardShortcut("u", modifiers: [.command])
+            }
         }
     }
 }

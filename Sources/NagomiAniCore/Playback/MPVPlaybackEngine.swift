@@ -443,6 +443,14 @@ public final class MPVPlaybackEngine: PlaybackEngine {
         case "duration":
             let value = valueData.assumingMemoryBound(to: Double.self).pointee
             cachedDuration = value.isFinite ? value : 0
+            // 时长事件即时上报：ready 发布可能抢在时长属性送达之前（竞态），
+            // 且加载期被暂停时状态直接进 paused 不经过 ready——UI 依赖该回调修正量程
+            if value.isFinite, value > 0 {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.playbackEngine(self, didUpdateDuration: value)
+                }
+            }
 
         case "pause":
             pausedFlag = valueData.assumingMemoryBound(to: Int32.self).pointee != 0

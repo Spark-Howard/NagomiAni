@@ -771,16 +771,30 @@ extension PlayerModel: @preconcurrency PlaybackEngineDelegate {
     func playbackEngine(_ engine: PlaybackEngine, didChangeState state: PlaybackState) {
         self.state = state
         if case .ready = state {
-            duration = engine.duration
+            // 引擎时长为 0 时不覆盖（duration 属性事件可能晚于 ready 送达，重载时
+            // 否则会把上一文件的正确时长清成 0）；晚到的事件走 didUpdateDuration 修正
+            applyDuration(engine.duration)
             syncTracks()
-            pendingResume?.duration = duration
-            // 记录的续播点超出实际时长（文件被替换/记录损坏）→ 放弃闸门，正常记录
-            if let target = pendingResumeTarget, duration > 0, target > duration - 1 {
-                pendingResumeTarget = nil
-            }
         }
         // 暂停/出错等状态切换频率低，强制落盘一次
         flushResume(force: true)
+    }
+
+    /// 时长就绪（ready 状态或引擎时长事件）：依赖时长的收尾逻辑收敛到这里。
+    /// 加载期被暂停（切页自动暂停）时状态直接进 paused 跳过 ready，
+    /// 全靠 didUpdateDuration 把时长补上，否则进度条量程一直是 0:00。
+    private func applyDuration(_ value: Double) {
+        guard value.isFinite, value > 0 else { return }
+        duration = value
+        pendingResume?.duration = value
+        // 记录的续播点超出实际时长（文件被替换/记录损坏）→ 放弃闸门，正常记录
+        if let target = pendingResumeTarget, target > value - 1 {
+            pendingResumeTarget = nil
+        }
+    }
+
+    func playbackEngine(_ engine: PlaybackEngine, didUpdateDuration value: Double) {
+        applyDuration(value)
     }
 
     func playbackEngineDidFinish(_ engine: PlaybackEngine) {

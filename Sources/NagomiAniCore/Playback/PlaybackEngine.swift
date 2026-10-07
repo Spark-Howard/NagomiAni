@@ -102,10 +102,15 @@ public protocol PlaybackEngineDelegate: AnyObject {
     func playbackEngine(_ engine: PlaybackEngine, didFailWith error: Error)
     /// 轨道列表变化（内置轨道就绪、外挂字幕加载、轨道选择变更等）
     func playbackEngineDidUpdateTracks(_ engine: PlaybackEngine)
+    /// 时长已知或变化（秒）。不能只在 ready 状态读一次 duration：
+    /// ready 可能早于时长属性事件送达（竞态读出 0），且"加载期被暂停"路径
+    /// 状态直接进 paused 不经过 ready——UI 依赖该回调修正进度条量程
+    func playbackEngine(_ engine: PlaybackEngine, didUpdateDuration duration: Double)
 }
 
 public extension PlaybackEngineDelegate {
     func playbackEngineDidUpdateTracks(_ engine: PlaybackEngine) {}
+    func playbackEngine(_ engine: PlaybackEngine, didUpdateDuration duration: Double) {}
 }
 
 /// 播放内核抽象：UI 与业务逻辑只依赖此协议，不关心底层实现

@@ -311,6 +311,21 @@ public final class MPVPlaybackEngine: PlaybackEngine {
         mpv_set_option_string(handle, "audio-file-auto", "no")
         mpv_set_option_string(handle, "volume", "100")
 
+        // 画质链路：mpv 默认缩放参数偏保守（bilinear 级降采样、无去带），
+        // 感知上"画质发糊/一般"的主因。这里按 gpu-hq 档显式启用高质量链路：
+        // spline36 上采样（锐利无振铃）、mitchell 降采样 + 纠正（缩小不闪 alias）、
+        // sigmoid 上采样（抑制过冲光晕）、deband 治动漫天空/暗场的色带。
+        // grain 调低（默认 48 会引入可见噪点，动画干净源反而显得"脏"）
+        mpv_set_option_string(handle, "scale", "spline36")
+        mpv_set_option_string(handle, "cscale", "spline36")
+        mpv_set_option_string(handle, "dscale", "mitchell")
+        mpv_set_option_string(handle, "correct-downscaling", "yes")
+        mpv_set_option_string(handle, "linear-downscaling", "yes")
+        mpv_set_option_string(handle, "sigmoid-upscaling", "yes")
+        mpv_set_option_string(handle, "deband", "yes")
+        mpv_set_option_string(handle, "deband-params", "grain=12")
+        mpv_set_option_string(handle, "dither-depth", "auto")
+
         if mpv_initialize(handle) < 0 {
             setState(.failed("初始化播放内核失败"))
             return

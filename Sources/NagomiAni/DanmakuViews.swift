@@ -39,12 +39,14 @@ private struct DanmakuLayerRepresentable: NSViewRepresentable {
         host.wantsLayer = true
         // 子图层默认不裁剪（弹幕起点在画面外会被画到视频区域外）——必须显式裁剪
         host.layer?.masksToBounds = true
+        host.timeProvider = currentTime
         host.syncFrom(controller: controller, isPlaying: isPlaying)
         host.startAnimating()
         return host
     }
 
     func updateNSView(_ host: DanmakuHostView, context: Context) {
+        host.timeProvider = currentTime
         host.syncFrom(controller: controller, isPlaying: isPlaying)
     }
 
@@ -58,6 +60,10 @@ private struct DanmakuLayerRepresentable: NSViewRepresentable {
 /// 锚点随每次事件刷新，误差不跨事件累积（≤ 一个事件间隔，可忽略）。
 @MainActor
 private final class DanmakuTimeSync {
+    /// 锚点外推上限（秒）：超过视为锚点陈旧（暂停后刚恢复的一瞬、视频卡顿
+    /// 缓冲中），不再补齐差值——否则整段停走时长会在一帧内兑现，弹幕瞬间滚空
+    private static let maxExtrapolation: Double = 1.5
+
     private var lastEngine: Double = -1
     private var lastWall = Date.distantPast
 
@@ -67,7 +73,9 @@ private final class DanmakuTimeSync {
             lastWall = now
         }
         guard playing else { return engine }
-        return engine + now.timeIntervalSince(lastWall)
+        let wall = now.timeIntervalSince(lastWall)
+        guard wall <= Self.maxExtrapolation else { return engine }
+        return engine + wall
     }
 }
 
@@ -217,7 +225,15 @@ final class DanmakuHostView: NSView {
     func startAnimating() {
         guard timer == nil else { return }
         let source = DispatchSource.makeTimerSource(queue: .main)
-        source.schedule(deadline: .now(), repeating: .milliseconds(16), leeway: .milliseconds(1))
+        // 步进频率对齐显示器刷新率（普通屏 60Hz→16.7ms，ProMotion 120Hz→8.3ms）：
+        // 弹幕位置逐帧直接赋值，步进跟住刷新率才能吃满高刷屏（否则 120Hz 屏上
+        // 每两帧才动一次）；60Hz 屏上多出的步进只是让合成拿到更新的位置，无害
+        let fps = max(60, NSScreen.main?.maximumFramesPerSecond ?? 60)
+        source.schedule(
+            deadline: .now(),
+            repeating: .nanoseconds(1_000_000_000 / fps),
+            leeway: .nanoseconds(0)
+        )
         source.setEventHandler { [weak self] in self?.step() }
         source.resume()
         timer = source

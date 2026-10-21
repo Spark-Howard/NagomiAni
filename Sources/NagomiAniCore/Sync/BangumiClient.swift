@@ -124,6 +124,12 @@ public final class BangumiClient: @unchecked Sendable {
         try await send(get("/v0/users/-/collections/\(subjectID)"))
     }
 
+    /// 我的单个条目收藏（用户名形式：GET /v0/users/{username}/collections/{subject_id}）。
+    /// `-` 别名在部分条目上会被服务端误判为"用户不存在"（404），用户名形式是可靠读法
+    public func myCollection(username: String, subjectID: Int) async throws -> UserSubjectCollection {
+        try await send(get("/v0/users/\(username)/collections/\(subjectID)"))
+    }
+
     /// 新增或修改条目收藏（POST /v0/users/-/collections/{subject_id}）
     public func updateCollection(subjectID: Int, payload: CollectionModifyPayload) async throws {
         var request = try makeRequest("/v0/users/-/collections/\(subjectID)")

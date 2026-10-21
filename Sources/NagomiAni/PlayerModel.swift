@@ -420,11 +420,16 @@ final class PlayerModel: ObservableObject {
     /// 已是在看 → 什么都不发（用户要求：不重复设置，也避免触碰收藏元数据）；
     /// 想看/搁置/抛弃/未收藏 → 补设为在看一次（与 bgm.tv "看过即在看"的惯例一致）。
     /// 失败只记日志——单集"看过"标记已在之前成功完成，不因此回滚或报错。
+    ///
+    /// ⚠️ 单条收藏查询必须走用户名形式：服务端对 `/v0/users/-/collections/{id}`
+    /// 会误判"用户不存在"（404，实测 2026-10），错判成"从未收藏"会导致已是在看
+    /// 也反复补发设为在看。`-` 在单集收藏（/episodes）端点正常，两个端点行为不一致。
     private func ensureDoing(client: BangumiClient, subjectID: Int) async {
         do {
+            let username = try await cachedUsername(client: client)
             let currentType: Int
             do {
-                currentType = try await client.myCollection(subjectID: subjectID).type?.rawValue ?? 0
+                currentType = try await client.myCollection(username: username, subjectID: subjectID).type?.rawValue ?? 0
             } catch BangumiError.httpStatus(let code, _) where code == 404 {
                 currentType = 0 // 从未收藏过
             }
@@ -437,6 +442,16 @@ final class PlayerModel: ObservableObject {
         } catch {
             syncDebug("在看状态收敛失败（不影响已完成的集标记）：\(Self.describe(error))")
         }
+    }
+
+    /// 会话内缓存的当前用户名（ensureDoing 的可靠读法依赖它，避免每集多查一次 /v0/me）
+    private var cachedUsernameValue: String?
+
+    private func cachedUsername(client: BangumiClient) async throws -> String {
+        if let cachedUsernameValue { return cachedUsernameValue }
+        let user = try await client.currentUser()
+        cachedUsernameValue = user.username
+        return user.username
     }
 
     /// 该错误是否值得入队重试：网络/限频/服务端故障可重试；404（条目不存在）、

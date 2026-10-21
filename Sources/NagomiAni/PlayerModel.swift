@@ -393,6 +393,8 @@ final class PlayerModel: ObservableObject {
                 try await client.markEpisodes(subjectID: subjectID, episodeIDs: [ep.id], type: .watched)
                 syncMessage = "已同步：第 \(episode) 集标记为看过 ✓"
                 syncDebug("✓ 已同步：episodeID=\(ep.id) → subject \(subjectID)")
+                // 收藏状态收敛：看过一集 → 条目应为"在看"（幂等：已是在看不发请求）
+                await ensureDoing(client: client, subjectID: subjectID)
                 // 同步成功顺带冲刷积压的离线记录
                 await flushPendingWatchedMarks(client: client)
             } catch {
@@ -411,6 +413,29 @@ final class PlayerModel: ObservableObject {
                     syncMessage = "同步失败：\(Self.describe(error))"
                 }
             }
+        }
+    }
+
+    /// 收藏状态收敛（幂等）：看完一集后条目应为"在看"。
+    /// 已是在看 → 什么都不发（用户要求：不重复设置，也避免触碰收藏元数据）；
+    /// 想看/搁置/抛弃/未收藏 → 补设为在看一次（与 bgm.tv "看过即在看"的惯例一致）。
+    /// 失败只记日志——单集"看过"标记已在之前成功完成，不因此回滚或报错。
+    private func ensureDoing(client: BangumiClient, subjectID: Int) async {
+        do {
+            let currentType: Int
+            do {
+                currentType = try await client.myCollection(subjectID: subjectID).type?.rawValue ?? 0
+            } catch BangumiError.httpStatus(let code, _) where code == 404 {
+                currentType = 0 // 从未收藏过
+            }
+            guard currentType != 3 else {
+                syncDebug("收藏状态已是在看，不重复设置")
+                return
+            }
+            try await client.updateCollection(subjectID: subjectID, payload: CollectionModifyPayload(type: .doing))
+            syncDebug("收藏状态：\(currentType) → 在看（3）")
+        } catch {
+            syncDebug("在看状态收敛失败（不影响已完成的集标记）：\(Self.describe(error))")
         }
     }
 

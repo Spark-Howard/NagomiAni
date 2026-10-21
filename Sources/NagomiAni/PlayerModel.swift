@@ -302,6 +302,14 @@ final class PlayerModel: ObservableObject {
         engine.seek(to: seconds, completion: nil)
     }
 
+    /// 看完同步链路的诊断日志（仅 DEBUG 构建输出到控制台）：
+    /// 同步不生效时终端 [sync] 行直接给出是哪道闸门拦下的
+    private func syncDebug(_ line: String) {
+        #if DEBUG
+        print("[sync] \(line)")
+        #endif
+    }
+
     /// 播放中判定：自然播放到 95% 即标记看过（EOF 由 playbackEngineDidFinish 兜底）
     private func checkAutoMarkWatched() {
         guard state == .playing, currentTime > 0, duration >= watchedMinDuration else { return }
@@ -319,23 +327,38 @@ final class PlayerModel: ObservableObject {
     }
 
     private func autoSyncOnFinish() {
+        syncDebug("EOF: media=\(String(describing: currentMedia)) bound=\(currentMedia.flatMap { bindingID(for: $0.seriesKey) }) lastSeekAgo=\(lastSeekTime.map { Int(Date().timeIntervalSince($0)) } ?? -1)s")
         // seek/拖动后短时间内到达 EOF（拖到结尾看一眼）不算自然看完，防误标
-        if let lastSeek = lastSeekTime, Date().timeIntervalSince(lastSeek) < seekIgnoreWindow { return }
-        guard let media = currentMedia else { return }
+        if let lastSeek = lastSeekTime, Date().timeIntervalSince(lastSeek) < seekIgnoreWindow {
+            syncDebug("SKIP：EOF 前 \(seekIgnoreWindow)s 内有过拖动（防误标）")
+            return
+        }
+        guard let media = currentMedia else {
+            syncDebug("SKIP：无当前媒体")
+            return
+        }
         guard let episode = media.episodeNumber else {
             // 已关联条目却识别不出集号：明确告知（否则用户以为同步失效）
             if bindingID(for: media.seriesKey) != nil {
                 syncMessage = "已看完，但未能从文件名识别集号，本集未同步到 Bangumi"
+                syncDebug("SKIP：集号未识别（已关联 \(media.seriesKey)）→ 已提示")
             }
             return
         }
-        guard bindingID(for: media.seriesKey) != nil else { return } // 未关联：不打扰
+        guard bindingID(for: media.seriesKey) != nil else {
+            syncDebug("SKIP：未关联 Bangumi 条目（\(media.seriesKey)）")
+            return
+        } // 未关联：不打扰
         let key = "\(media.seriesKey):\(episode)"
-        guard !markedWatchedKeys.contains(key) else { return } // 本次运行已同步过
+        guard !markedWatchedKeys.contains(key) else {
+            syncDebug("SKIP：本集本次运行已同步过")
+            return
+        }
         markWatched(episode: episode, seriesKey: media.seriesKey, key: key)
     }
 
     private func markWatched(episode: Int, seriesKey: String, key: String) {
+        syncDebug("markWatched：第 \(episode) 集（\(seriesKey)）")
         // 先入集合：同一集本次运行内只触发一次
         markedWatchedKeys.insert(key)
         // 已按"看完"处理：清除续播记录，下次从头播
@@ -349,26 +372,34 @@ final class PlayerModel: ObservableObject {
                     if let subjectID {
                         enqueuePendingWatched(subjectID: subjectID, episodeNumber: episode)
                         syncMessage = "暂时无法连接 Bangumi，已记录待同步（待同步 \(Self.loadPendingWatchedMarks().count) 条）"
+                        syncDebug("入队待同步：未登录/离线（subjectID=\(subjectID)）")
                     } else {
                         syncMessage = "未登录，本集未能同步到 Bangumi"
+                        syncDebug("SKIP：未登录且无绑定")
                     }
                     return
                 }
-                guard let subjectID else { return }
+                guard let subjectID else {
+                    syncDebug("SKIP：绑定为空")
+                    return
+                }
                 let eps = try await client.allEpisodes(subjectID: subjectID)
                 guard let ep = eps.first(where: { Int(($0.sort ?? 0).rounded()) == episode }) else {
                     // 永久性失败（条目里没有该集）：不入队，避免无限重试
                     syncMessage = "在 Bangumi 上未找到第 \(episode) 集，跳过同步"
+                    syncDebug("SKIP：Bangumi 条目 \(subjectID) 无 sort=\(episode) 的集（共 \(eps.count) 集，sort 范围 \(eps.first?.sort ?? -1)~\(eps.last?.sort ?? -1)）")
                     return
                 }
                 try await client.markEpisodes(subjectID: subjectID, episodeIDs: [ep.id], type: .watched)
                 syncMessage = "已同步：第 \(episode) 集标记为看过 ✓"
+                syncDebug("✓ 已同步：episodeID=\(ep.id) → subject \(subjectID)")
                 // 同步成功顺带冲刷积压的离线记录
                 await flushPendingWatchedMarks(client: client)
             } catch {
                 // 网络/服务端临时错误：入队待同步，联网后自动补；
                 // 永久性失败（条目不存在 404/响应异常）重试也无意义，不入队——
                 // 否则死重试会挤占队列容量，把真正待同步的记录淘汰掉
+                syncDebug("失败：\(Self.describe(error)) → \(Self.isRetryableSyncError(error) ? "入队待重试" : "不再重试")")
                 if let subjectID {
                     if Self.isRetryableSyncError(error) {
                         enqueuePendingWatched(subjectID: subjectID, episodeNumber: episode)

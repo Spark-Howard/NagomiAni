@@ -80,9 +80,6 @@ struct ContentView: View {
                 return library.nextLocalPlayback(after: context.url)
             }
         }
-            }
-            #endif
-        }
         .onReceive(model.$fileName) { _ in
             updateWindowTitle()
         }

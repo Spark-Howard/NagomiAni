@@ -38,8 +38,29 @@ public enum MediaMatching {
                 return value
             }
         }
+        // 兜底：结尾集号（"Show 01" / "Show_01" / "孤独摇滚 07 [1080p]" 等常见命名此前
+        // 全部漏解析——EOF 看完同步会静默跳过）。先剥 [] 标签再取分隔符后的结尾数字。
+        // 两条例外（均为既定约定）：数字开头番名（"3-gatsu"、"7 Seeds"）结尾数字不可信；
+        // 小数/年份尾巴（"08.5"、"2019"）不算集数——前者被分隔符要求自然排除，后者位数超限
+        let stripped = name.replacingOccurrences(
+            of: "\\[[^\\]]*\\]", with: " ", options: .regularExpression
+        )
+        let trimmed = stripped.trimmingCharacters(in: .whitespaces)
+        guard let first = trimmed.first, !first.isNumber else { return nil }
+        if let match = Self.trailingEpisodePattern.firstMatch(
+            in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)
+        ) {
+            let value = Int((trimmed as NSString).substring(with: match.range(at: 1)))
+            if let value, value >= 1 { return value }
+        }
         return nil
     }
+
+    /// 结尾集号兜底：必须紧跟在空白/下划线/连字符之后（"命运石之门0" 的标题尾 0 不误判），
+    /// 1-3 位数字（4 位是年份），其后只允许空白到结尾
+    private static let trailingEpisodePattern = try! NSRegularExpression(
+        pattern: "[\\s_-]0*(\\d{1,3})\\s*$"
+    )
 
     // MARK: - 系列键（去掉集数/标签后的文件名，用于聚合与记忆关联）
 
@@ -61,6 +82,9 @@ public enum MediaMatching {
         }
         // 去掉所有 [] 标签（字幕组/画质等），使不同字幕组的同一部番能聚合
         key = key.replacingOccurrences(of: "\\[[^\\]]*\\]", with: "", options: .regularExpression)
+        // 去掉结尾集号（与 episodeNumber 的结尾集号兜底对应："Show 01"/"Show_01" 聚合为同一系列）。
+        // 必须有分隔符——"命运石之门0" 这类标题尾数字不剥（否则与"命运石之门"错误聚合）
+        key = key.replacingOccurrences(of: "[\\s_-]+0*\\d{1,3}\\s*$", with: "", options: .regularExpression)
         // 去掉常见画质/编码/语言标签
         let tags = [
             "2160p", "1080p", "720p", "480p", "4k",

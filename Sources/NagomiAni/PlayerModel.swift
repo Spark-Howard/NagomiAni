@@ -321,13 +321,17 @@ final class PlayerModel: ObservableObject {
     private func autoSyncOnFinish() {
         // seek/拖动后短时间内到达 EOF（拖到结尾看一眼）不算自然看完，防误标
         if let lastSeek = lastSeekTime, Date().timeIntervalSince(lastSeek) < seekIgnoreWindow { return }
-        guard let media = currentMedia,
-              let episode = media.episodeNumber,
-              bindingID(for: media.seriesKey) != nil else {
+        guard let media = currentMedia else { return }
+        guard let episode = media.episodeNumber else {
+            // 已关联条目却识别不出集号：明确告知（否则用户以为同步失效）
+            if bindingID(for: media.seriesKey) != nil {
+                syncMessage = "已看完，但未能从文件名识别集号，本集未同步到 Bangumi"
+            }
             return
         }
+        guard bindingID(for: media.seriesKey) != nil else { return } // 未关联：不打扰
         let key = "\(media.seriesKey):\(episode)"
-        guard !markedWatchedKeys.contains(key) else { return }
+        guard !markedWatchedKeys.contains(key) else { return } // 本次运行已同步过
         markWatched(episode: episode, seriesKey: media.seriesKey, key: key)
     }
 

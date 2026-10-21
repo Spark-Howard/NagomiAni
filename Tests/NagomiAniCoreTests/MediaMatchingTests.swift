@@ -23,6 +23,28 @@ final class MediaMatchingTests: XCTestCase {
         XCTAssertNil(MediaMatching.parse(fileName: "2024 - 合集.mkv").episodeNumber, "年份不应被当成集数")
     }
 
+    func testEpisodeParsingTrailingNumberFallback() {
+        // 结尾集号兜底：此前这些常见命名全部漏解析 → EOF 看完同步静默跳过
+        XCTAssertEqual(MediaMatching.parse(fileName: "Show 01.mkv").episodeNumber, 1)
+        XCTAssertEqual(MediaMatching.parse(fileName: "Show_01.mkv").episodeNumber, 1)
+        XCTAssertEqual(MediaMatching.parse(fileName: "Show 2.mkv").episodeNumber, 2)
+        XCTAssertEqual(MediaMatching.parse(fileName: "孤独摇滚 07 [WebRip 1080p].mkv").episodeNumber, 7)
+        // 负例：数字开头番名结尾数字不可信 / 4 位年份 / 版本尾 0 / 无数字
+        XCTAssertNil(MediaMatching.parse(fileName: "3-gatsu no Lion 01.mkv").episodeNumber)
+        XCTAssertNil(MediaMatching.parse(fileName: "7 Seeds 02.mkv").episodeNumber)
+        XCTAssertNil(MediaMatching.parse(fileName: "Movie 2019.mkv").episodeNumber, "年份不应被当成集数")
+        XCTAssertNil(MediaMatching.parse(fileName: "剧场版 3.0.mkv").episodeNumber, "版本号尾 0 不算集数")
+        XCTAssertNil(MediaMatching.parse(fileName: "命运石之门 特典.mkv").episodeNumber)
+    }
+
+    func testSeriesKeyGroupsTrailingNumberFiles() {
+        // "Show 01" / "Show_02" 此前各自成键；兜底后应聚合为同一系列
+        XCTAssertEqual(MediaMatching.parse(fileName: "Show 01.mkv").seriesKey,
+                       MediaMatching.parse(fileName: "Show 02.mkv").seriesKey)
+        XCTAssertEqual(MediaMatching.parse(fileName: "Show_01.mkv").seriesKey,
+                       MediaMatching.parse(fileName: "Show 02 [1080p].mkv").seriesKey)
+    }
+
     func testEpisodeParsingBareNumbers() {
         XCTAssertEqual(MediaMatching.parse(fileName: "01.mkv").episodeNumber, 1)
         XCTAssertEqual(MediaMatching.parse(fileName: "12.mkv").episodeNumber, 12)
